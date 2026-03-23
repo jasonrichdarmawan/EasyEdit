@@ -101,7 +101,8 @@ def layer_stats(
         # raw_ds = {'train': raw_ds}
         raw_ds = load_dataset(
             ds_name,
-            dict(wikitext="wikitext-103-raw-v1", wikipedia="20200501.en")[ds_name]
+            dict(wikitext="wikitext-103-raw-v1", wikipedia="20220301.en")[ds_name],
+            trust_remote_code=True
         )
         if hasattr(model.config, 'n_positions'):
             maxlen = model.config.n_positions
@@ -127,7 +128,7 @@ def layer_stats(
         return TokenizedDataset(raw_ds["train"], tokenizer, maxlen=maxlen)
 
     # Continue with computation of statistics
-    batch_size = 100  # Examine this many dataset texts at once
+    batch_size = 20  # Examine this many dataset texts at once
     if hasattr(model.config, 'n_positions'):
         npos = model.config.n_positions
     elif hasattr(model.config, 'max_sequence_length'):
@@ -148,7 +149,7 @@ def layer_stats(
             npos = 4096
 
     if batch_tokens is None:
-        batch_tokens = npos * 3  # Sort and divide into batches with this many tokens
+        batch_tokens = 1024  # Sort and divide into batches with this many tokens
     if precision is None:
         precision = "float64"
     dtype = getattr(torch, precision)
@@ -180,7 +181,7 @@ def layer_stats(
         collate_fn=length_collation(batch_tokens),
         pin_memory=True,
         random_sample=1,
-        num_workers=2,
+        num_workers=0,
     )
     batch_count = -(-(sample_size or len(ds)) // batch_size)
     with torch.no_grad():

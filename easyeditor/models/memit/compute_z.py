@@ -25,7 +25,7 @@ def compute_z(
 
     # Get model parameters
     lm_w, ln_f = (
-        nethook.get_parameter(model, f"{hparams.lm_head_module}.weight").T,
+        (nethook.get_parameter(model, f"{hparams.lm_head_module}.weight").T if not getattr(model.config, 'tie_word_embeddings', False) else model.get_input_embeddings().weight.T),
         nethook.get_module(model, hparams.ln_f_module),
     )
     try:

@@ -38,10 +38,19 @@ from transformers.modeling_outputs import (
 )
 from transformers.modeling_utils import (
     PreTrainedModel,
-    apply_chunking_to_forward,
-    find_pruneable_heads_and_indices,
-    prune_linear_layer,
 )
+try:
+    from transformers.modeling_utils import apply_chunking_to_forward
+except ImportError:
+    def apply_chunking_to_forward(forward_fn, chunk_size, chunk_dim, *input_tensors):
+        if chunk_size > 0:
+            raise NotImplementedError
+        return forward_fn(*input_tensors)
+try:
+    from transformers.modeling_utils import find_pruneable_heads_and_indices, prune_linear_layer
+except ImportError:
+    from transformers.pytorch_utils import find_pruneable_heads_and_indices, prune_linear_layer
+
 from transformers.utils import logging
 from transformers.models.bert.configuration_bert import BertConfig
 
