@@ -39,11 +39,13 @@ def main():
         parser.add_argument(*args, **kwargs)
 
     aa("--model_name", default="gpt2-xl", choices=["gpt2-xl", "EleutherAI/gpt-j-6B", "Qwen/Qwen3-4B-Instruct-2507"])
+    aa("--apply_chat_template", action="store_true")
     aa("--dataset", default="wikipedia", choices=["wikitext", "wikipedia"])
     aa("--layers", default=[17], type=lambda x: list(map(int, x.split(","))))
     aa("--layer_tmp", default=["model.layers.{}.mlp.down_proj"], type=lambda x: x.split(","))
     aa("--to_collect", default=["mom2"], type=lambda x: x.split(","))
     aa("--sample_size", default=100000, type=lambda x: None if x == "all" else int(x))
+    aa("--batch_size", default=100, type=int)
     aa("--batch_tokens", default=None, type=lambda x: None if x == "any" else int(x))
     aa("--precision", default="float32", choices=["float64", "float32", "float16"])
     aa("--stats_dir", default="data/stats", type=str)
@@ -76,6 +78,8 @@ def main():
         precision=args.precision,
         batch_tokens=args.batch_tokens,
         download=args.download,
+        batch_size=args.batch_size,
+        apply_chat_template=args.apply_chat_template
     )
 
 
@@ -93,7 +97,9 @@ def layer_stats(
     download=True,
     progress=tqdm,
     force_recompute=False,
-    hparams=None
+    hparams=None,
+    batch_size=100, # Examine this many dataset texts at once
+    apply_chat_template=False,
 ):
     """
     Function to load or compute cached stats.
@@ -132,10 +138,9 @@ def layer_stats(
 
         if batch_tokens is not None and batch_tokens < maxlen:
             maxlen = batch_tokens
-        return TokenizedDataset(raw_ds["train"], tokenizer, maxlen=maxlen)
+        return TokenizedDataset(raw_ds["train"], tokenizer, maxlen=maxlen, apply_chat_template=apply_chat_template)
 
     # Continue with computation of statistics
-    batch_size = 1  # Examine this many dataset texts at once
     if hasattr(model.config, 'n_positions'):
         npos = model.config.n_positions
     elif hasattr(model.config, 'max_sequence_length'):
@@ -199,11 +204,18 @@ def layer_stats(
         )
     )
     
+    first_index_printed = False
     batch_count = -(-(sample_size or len(ds)) // batch_size)
     with torch.no_grad():
         for batch_group in progress(loader, total=batch_count):
             for batch in batch_group:
                 batch = dict_to_(batch, model.device)
+                
+                if not first_index_printed:
+                    text = tokenizer.decode(batch["input_ids"][0])
+                    print(f"{'=' * 100}\nExample (length {len(batch['input_ids'][0])}):\n{text}\n{'=' * 100}")
+                    first_index_printed = True
+                
                 with TraceDict(
                     model, layer_name, retain_input=True, retain_output=False, stop=True
                 ) as tr:
