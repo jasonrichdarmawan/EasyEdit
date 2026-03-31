@@ -7,7 +7,7 @@ layers: [4, 5, 6, 7, 8]
 clamp_norm_factor: 4
 layer_selection: "all"
 fact_token: "subject_last"
-v_num_grad_steps: 25
+v_num_grad_steps: 10
 v_lr: 5e-1
 v_loss_layer: 27
 v_weight_decay: 1e-3

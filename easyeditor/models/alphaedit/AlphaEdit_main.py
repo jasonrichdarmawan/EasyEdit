@@ -22,6 +22,7 @@ COV_CACHE = {}
 
 P_loaded = False
 cache_c_new = False
+INITIAL_WEIGHT_NORMS = {}  # Fixed reference norms recorded only on first call
 
 def apply_AlphaEdit_to_model(
     model: AutoModelForCausalLM,
@@ -42,7 +43,7 @@ def apply_AlphaEdit_to_model(
     :return: (1) the updated model, (2) an original copy of the weights that changed
     """
 
-    global P, P_loaded, cache_c, cache_c_new
+    global P, P_loaded, cache_c, cache_c_new, INITIAL_WEIGHT_NORMS
 
     weights_copy = {}
     if copy:
@@ -57,6 +58,8 @@ def apply_AlphaEdit_to_model(
             P = torch.zeros((len(hparams.layers), W_out.shape[1], W_out.shape[1]), device="cpu")
         elif "gpt2-xl" in hparams.model_name.lower():
             P = torch.zeros((len(hparams.layers), W_out.shape[0], W_out.shape[0]), device="cpu")
+        elif "qwen" in hparams.model_name.lower():
+            P = torch.zeros((len(hparams.layers), W_out.shape[1], W_out.shape[1]), device="cpu")
         del W_out
         for i, layer in enumerate(hparams.layers):
             P[i,:,:] = get_project(model, tok, layer, hparams)
@@ -74,9 +77,21 @@ def apply_AlphaEdit_to_model(
             cache_c = torch.zeros((len(hparams.layers), W_out.shape[1], W_out.shape[1]), device="cpu")
         elif "gpt2-xl" in hparams.model_name.lower():
             cache_c = torch.zeros((len(hparams.layers), W_out.shape[0], W_out.shape[0]), device="cpu")
+        elif "qwen" in hparams.model_name.lower():
+            cache_c = torch.zeros((len(hparams.layers), W_out.shape[1], W_out.shape[1]), device="cpu")
         del W_out
         cache_c_new = True
     
+    # Record initial weight norms ONLY on first call — never update after that
+    if not INITIAL_WEIGHT_NORMS:
+        with torch.no_grad():
+            for layer in hparams.layers:
+                w_name = f"{hparams.rewrite_module_tmp.format(layer)}.weight"
+                INITIAL_WEIGHT_NORMS[w_name] = torch.linalg.norm(
+                    nethook.get_parameter(model, w_name).float()
+                ).item()
+        print(f"Recorded initial weight norms: { {k: f'{v:.2f}' for k, v in INITIAL_WEIGHT_NORMS.items()} }")
+
     deltas = execute_AlphaEdit(model, tok, requests, hparams, cache_template=cache_template)
 
     with torch.no_grad():
@@ -87,7 +102,22 @@ def apply_AlphaEdit_to_model(
 
             if return_orig_weights and w_name not in weights_copy:
                 weights_copy[w_name] = w.detach().clone()
+            # Clamp using FIXED initial norm — never changes across batches
+            init_norm = INITIAL_WEIGHT_NORMS[w_name]
+            max_upd_norm = init_norm * hparams.clamp_norm_factor
+            upd_norm = torch.linalg.norm(upd_matrix)
+            if upd_norm > max_upd_norm:
+                upd_matrix = upd_matrix * (max_upd_norm / upd_norm)
+                print(f"Clamped upd_matrix norm from {upd_norm:.2f} to {max_upd_norm:.2f}")
             w[...] += upd_matrix.float()
+            # Guard against inf/nan from accumulated edits
+            w[...] = torch.nan_to_num(w, nan=0.0, posinf=1e4, neginf=-1e4)
+            # Clamp total weight norm to prevent unbounded growth under sequential editing
+            current_norm = torch.linalg.norm(w.float()).item()
+            max_weight_norm = init_norm * (1 + hparams.clamp_norm_factor)
+            if current_norm > max_weight_norm:
+                w[...] = w * (max_weight_norm / current_norm)
+                print(f"Clamped weight norm from {current_norm:.2f} to {max_weight_norm:.2f}")
 
     print(f"New weights successfully inserted into {list(deltas.keys())}")
 
@@ -211,8 +241,8 @@ def execute_AlphaEdit(
         targets = targets.repeat_interleave(repeat_factor, dim=1)
         resid = targets / (len(hparams.layers) - i)  # Distribute residual across layers
         upd_matrix = torch.linalg.solve(
-                P[i,:,:].to(f"cuda:{hparams.device}") @ (layer_ks.to(f"cuda:{hparams.device}") @ layer_ks.T.to(f"cuda:{hparams.device}") + cache_c[i,:,:].to(f"cuda:{hparams.device}")) + hparams.L2*torch.eye(layer_ks.shape[0], dtype=torch.float,device=f"cuda:{hparams.device}"),
-                P[i,:,:].to(f"cuda:{hparams.device}") @ layer_ks.to(f"cuda:{hparams.device}") @ resid.T.to(f"cuda:{hparams.device}")
+            P[i,:,:].to(f"cuda:{hparams.device}").float() @ (layer_ks.to(f"cuda:{hparams.device}").float() @ layer_ks.T.to(f"cuda:{hparams.device}").float() + cache_c[i,:,:].to(f"cuda:{hparams.device}").float()) + hparams.L2*torch.eye(layer_ks.shape[0], dtype=torch.float,device=f"cuda:{hparams.device}"),
+            P[i,:,:].to(f"cuda:{hparams.device}").float() @ layer_ks.to(f"cuda:{hparams.device}").float() @ resid.T.to(f"cuda:{hparams.device}").float()
         )
 
         # Adjust update matrix shape
@@ -239,6 +269,12 @@ def execute_AlphaEdit(
     for i, layer in enumerate(hparams.layers):
         layer_ks = compute_ks(model, tok, requests, hparams, layer, context_templates).T
         cache_c[i,:,:] += layer_ks.cpu() @ layer_ks.cpu().T
+        # Clamp cache_c to prevent numerical overflow from accumulation
+        cache_c[i,:,:] = torch.clamp(cache_c[i,:,:], min=-1e6, max=1e6)
+        del layer_ks
+    import gc
+    gc.collect()
+    torch.cuda.empty_cache()
 
     # Restore state of original model
     with torch.no_grad():

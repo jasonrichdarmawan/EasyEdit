@@ -92,19 +92,31 @@ def compute_z(
         nonlocal target_init
 
         if cur_layer == hparams.layer_module_tmp.format(layer):
+            # Handle both tuple output (older transformers) and tensor output (transformers >= 4.51 / Qwen3)
+            if isinstance(cur_out, tuple):
+                hidden = cur_out[0]
+                is_tuple = True
+            else:
+                hidden = cur_out
+                is_tuple = False
+
             # Store initial value of the vector of interest
             if target_init is None:
                 print("Recording initial value of v*")
                 # Initial value is recorded for the clean sentence
-                target_init = cur_out[0][0, lookup_idxs[0]].detach().clone()
+                target_init = hidden[0, lookup_idxs[0]].detach().clone()
 
             # Add intervened delta
             for i, idx in enumerate(lookup_idxs):
-
-                if len(lookup_idxs)!=len(cur_out[0]):
-                    cur_out[0][idx, i, :] += delta
+                if len(lookup_idxs) != len(hidden):
+                    hidden[idx, i, :] += delta
                 else:
-                    cur_out[0][i, idx, :] += delta
+                    hidden[i, idx, :] += delta
+
+            if is_tuple:
+                return (hidden,) + cur_out[1:]
+            else:
+                return hidden
 
         return cur_out
 
