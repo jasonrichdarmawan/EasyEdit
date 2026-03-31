@@ -10,7 +10,7 @@ from ...util.globals import *
 from ...util.nethook import TraceDict, set_requires_grad
 from ...util.runningstats import (
     CombinedStat, Mean, NormMean, SecondMoment,
-    make_loader, save_cached_state, 
+    make_loader, save_cached_state, load_cached_state
 )
 
 from .tok_dataset import (
@@ -189,8 +189,11 @@ def layer_stats(
             progress = lambda x: x
         
         stat = CombinedStat(**{k: STAT_TYPES[k]() for k in to_collect})
+        cached_state = load_cached_state(filename, args)
+        if cached_state is not None and not force_recompute:
+            stat.load_state_dict(cached_state)
         
-        stats[ln] = (filename, stat)
+        stats[ln] = (filename, stat, cached_state is not None)
         
     loader = (
         make_loader(
@@ -202,6 +205,8 @@ def layer_stats(
             random_sample=1,
             # num_workers=2,
         )
+        if any(not cached for _, _, cached in stats.values())
+        else []
     )
     
     first_index_printed = False
@@ -221,13 +226,21 @@ def layer_stats(
                 ) as tr:
                     model(**batch, use_cache=False)
                 
-                for ln, (_, stat) in stats.items():
+                for ln, (_, stat, cached) in stats.items():
+                    if cached:
+                        continue
+                    # tr[ln].input shape: (batch, seq, dim)
+                    # if layer_name is "model.layers.{layer_num}.mlp.down_proj", dim is the MLP hidden size
+                    # feats shape: (batch * seq, dim)
+                    # if stat is SecondMoment, stat shape is (dim, dim)
                     feats = flatten_masked_batch(tr[ln].input, batch["attention_mask"])
                     # feats = flatten_masked_batch(tr[ln].output, batch["attention_mask"])
                     feats = feats.to(dtype=dtype)
                     stat.add(feats)
     
-    for ln, (filename, stat) in stats.items():
+    for ln, (filename, stat, cached) in stats.items():
+        if cached:
+            continue
         save_cached_state(filename, stat, args)
     return stat
 

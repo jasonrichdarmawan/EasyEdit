@@ -1,7 +1,8 @@
-alg_name: "MEMIT"
+alg_name: "AlphaEdit_Circuit"
 model_name: "Qwen/Qwen3-4B-Instruct-2507"
 stats_dir: "./data/stats"
-device: 5
+P_filename: "null_space_project.pt"
+device: 0
 layers: [4, 5, 6, 7, 8]
 clamp_norm_factor: 4
 layer_selection: "all"
@@ -18,8 +19,9 @@ layer_module_tmp: "model.layers.{}"
 mlp_module_tmp: "model.layers.{}.mlp"
 attn_module_tmp: "model.layers.{}.self_attn"
 ln_f_module: "model.norm"
-lm_head_module: "model.embed_tokens"
+lm_head_module: "lm_head"
 mom2_dataset: "wikipedia"
 mom2_n_samples: 100000
 mom2_dtype: "float32"
-model_parallel: False
+nullspace_threshold: 2e-2
+L2: 1
