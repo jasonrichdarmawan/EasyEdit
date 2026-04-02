@@ -1,7 +1,7 @@
-alg_name: "AlphaEdit_Circuit"
+alg_name: "AlphaEdit"
 model_name: "Qwen/Qwen3-4B-Instruct-2507"
-edit_with_chat_template: True
 stats_dir: "./data/stats"
+P_loc: "./data/stats/Qwen3-4B-Instruct-2507/wikipedia_stats/null_space_project_float32__t4096_100000.pt"
 device: 0
 layers: [4, 5, 6, 7, 8]
 clamp_norm_factor: 4

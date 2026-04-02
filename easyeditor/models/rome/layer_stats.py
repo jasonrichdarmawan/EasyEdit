@@ -167,7 +167,7 @@ def layer_stats(
     dtype = getattr(torch, precision)
     size_suffix = "" if sample_size is None else f"_{sample_size}"
     if batch_tokens < npos:
-        size_suffix = "_t{batch_tokens}" + size_suffix
+        size_suffix = f"_t{batch_tokens}" + size_suffix
     if model_name is None:
         # model_name = model.config._name_or_path.replace("/", "_")
         model_name = model.config._name_or_path.rsplit("/")[-1]
@@ -185,10 +185,8 @@ def layer_stats(
         file_extension = f"{model_name}/{ds_name}_stats/{ln}_{precision}_{'-'.join(sorted(to_collect))}{size_suffix}.npz"
         filename = stats_dir / file_extension
         
-        if progress is None:
-            progress = lambda x: x
-        
         stat = CombinedStat(**{k: STAT_TYPES[k]() for k in to_collect})
+        print(f"Trying to load cached stats from {filename}...")
         cached_state = load_cached_state(filename, args)
         if cached_state is not None and not force_recompute:
             stat.load_state_dict(cached_state)
@@ -208,6 +206,9 @@ def layer_stats(
         if any(not cached for _, _, cached in stats.values())
         else []
     )
+    
+    if progress is None:
+        progress = lambda x: x
     
     first_index_printed = False
     batch_count = -(-(sample_size or len(ds)) // batch_size)

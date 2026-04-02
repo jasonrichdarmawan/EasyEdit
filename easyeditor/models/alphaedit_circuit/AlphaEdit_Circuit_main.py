@@ -53,36 +53,36 @@ def apply_AlphaEdit_Circuit_to_model(
     # Calculate the null-space projection matrix P
     # Please ensure that you have downloaded "null_space_project.pt" to the easyedit folder beforehand, or get the P by following calculation
     model_name = model_name = model.config._name_or_path.rsplit("/")[-1]
-    P_filepath = Path(hparams.stats_dir) / model_name / f"{hparams.mom2_dataset}_stats" / hparams.P_filename
+    size_suffix = "" if hparams.mom2_n_samples is None else f"_{hparams.mom2_n_samples}"
+    if hparams.mom2_batch_tokens is not None:
+        size_suffix = f"_t{hparams.mom2_batch_tokens}" + size_suffix
+    P_filepath = Path(hparams.stats_dir) / model_name / f"{hparams.mom2_dataset}_stats" / f"null_space_project_{hparams.mom2_dtype}_{size_suffix}.pt"
     if not os.path.exists(P_filepath):
         print(f"The null-space projection matrix P does not exist and now calculate.")
-        W_out = nethook.get_parameter(model, f"{hparams.rewrite_module_tmp.format(hparams.layers[-1])}.weight")
-        if "llama" in hparams.model_name.lower() or "gpt-j-6b" in hparams.model_name.lower():
-            P = torch.zeros((len(hparams.layers), W_out.shape[1], W_out.shape[1]), device="cpu")
-        elif "gpt2-xl" in hparams.model_name.lower():
-            P = torch.zeros((len(hparams.layers), W_out.shape[0], W_out.shape[0]), device="cpu")
-        del W_out
+        P = [None for _ in hparams.layers]
         for i, layer in tqdm(enumerate(hparams.layers), desc="Computing projection matrix"):
-            P[i,:,:] = get_project(model, tok, layer, hparams)
+            P[i] = get_project(model, tok, layer, hparams)
         print("Saving null-space projection matrix P to avoid redundant future computations...")
         torch.save(P, P_filepath)
         P_loaded = True
     elif P_loaded == False:
         P = torch.load(P_filepath)
+        P = [P[i].contiguous() for i in range(P.shape[0])]
         P_loaded = True
 
     # Maintain the global variable cache_c to avoid redundant computations.
     # If this is the first calculation (i.e., cache_c_new == false), then initialize cache_c first
     if not cache_c_new:
         W_out = nethook.get_parameter(model, f"{hparams.rewrite_module_tmp.format(hparams.layers[-1])}.weight")
-        if "llama" in hparams.model_name.lower() or "gpt-j-6b" in hparams.model_name.lower():
-            cache_c = torch.zeros((len(hparams.layers), W_out.shape[1], W_out.shape[1]), device="cpu")
+        if any(item for item in ["llama", "gpt-j-6b", "qwen3-4b"] if item in hparams.model_name.lower()):
+            cache_c_shape = (W_out.shape[1], W_out.shape[1])
         elif "gpt2-xl" in hparams.model_name.lower():
-            cache_c = torch.zeros((len(hparams.layers), W_out.shape[0], W_out.shape[0]), device="cpu")
+            cache_c_shape = (W_out.shape[0], W_out.shape[0])
+        cache_c = [torch.zeros(cache_c_shape, device=W_out.device) for _ in hparams.layers]
         del W_out
         cache_c_new = True
     
-    deltas = execute_AlphaEdit(model, tok, requests, hparams, cache_template=cache_template)
+    deltas = execute_AlphaEdit_Circuit(model, tok, requests, hparams, cache_template=cache_template)
 
     with torch.no_grad():
         for w_name, upd_m in deltas.items():
@@ -99,7 +99,7 @@ def apply_AlphaEdit_Circuit_to_model(
     return model, weights_copy
 
 
-def execute_AlphaEdit(
+def execute_AlphaEdit_Circuit(
     model: AutoModelForCausalLM,
     tok: AutoTokenizer,
     requests: List[Dict],
@@ -116,16 +116,14 @@ def execute_AlphaEdit(
     # Update target and print info
     requests = deepcopy(requests)
     for i, request in enumerate(requests):
-        if request["target_new"][0] != " ":
-            # Space required for correct tokenization
-            requests[i]["target_new"] = " " + request["target_new"]
         if '{}' not in request['prompt']:
             assert request['subject'] in request['prompt'] or \
-                   print(f"Subject:{request['subject']} do not exist in prompt: {request['prompt']}")
-        requests[i]['prompt'] = requests[i]['prompt'].replace(requests[i]['subject'], '{}')
+                   print(f"Subject: {request['subject']} do not exist in prompt: {request['prompt']}")
+        else:
+            requests[i]['prompt'] = request['prompt'].replace('{}', request['subject'])
         print(
             f"Executing AlphaEdit algo for: "
-            f"[{request['prompt']}] -> [{request['target_new']}]"
+            f"[{request['prompt']}] [{request['target_true']}] -> [{request['target_new']}]"
         )
 
     # Retrieve weights that user desires to change
@@ -140,10 +138,11 @@ def execute_AlphaEdit(
     weights_copy = {k: v.detach().clone() for k, v in weights.items()}
 
     # Compute z for final layer
-    context_templates = get_context_templates(model, tok)
+    context_templates = get_context_templates(model=model, tokenizer=tok)
+    print(f"Context templates used for computing z and k/v pairs: {context_templates}")
+        
     z_layer = hparams.layers[-1]
     z_list = []
-
     for request in requests:
         # Retrieve k/v pair if already stored in cache
         cache_fname = (
@@ -200,25 +199,73 @@ def execute_AlphaEdit(
         print(f"Writing {layer_ks.size(1)} key/value pair(s) into layer {layer}")
 
         # Compute residual error
-        cur_zs = get_module_input_output_at_words(
-            model,
-            tok,
-            z_layer,
-            context_templates=[request["prompt"] for request in requests],
-            words=[request["subject"] for request in requests],
-            module_template=hparams.layer_module_tmp,
-            fact_token_strategy=hparams.fact_token,
-        )[1].T
+        all_prompts = []
+        if not hparams.edit_with_chat_template:
+            for i in range(len(requests)):
+                request = requests[i]
+                prompt = request["prompt"]
+                all_prompts.append(prompt)
+        else:
+            for i in range(len(requests)):
+                request = requests[i]
+                chat = [
+                    {"role": "system", "content": "Only respond with the answer. Do not include any explanations."},
+                    {"role": "user", "content": request["prompt"]},
+                ]
+                prompt = tok.apply_chat_template(chat, add_generation_prompt=True, tokenize=False)
+                all_prompts.append(prompt)
+        
+        input_tok = tok(
+            all_prompts,
+            return_tensors="pt",
+            padding=True,
+        ).to(model.device)
+        
+        idxs = []
+        if hparams.fact_token == "subject_first":
+            for i in range(len(all_prompts)):
+                request = requests[i]
+                start_char = all_prompts[i].find(request["subject"])
+                start_tok = input_tok.char_to_token(i, start_char)
+                idxs.append(start_tok)
+        elif hparams.fact_token == "subject_last":
+            for i in range(len(all_prompts)):
+                request = requests[i]
+                start_char = all_prompts[i].find(request["subject"])
+                start_tok = input_tok.char_to_token(i, start_char)
+                end_char = start_char + len(request["subject"]) - 1
+                end_tok = input_tok.char_to_token(i, end_char)
+                idxs.append(end_tok)
+                
+        with torch.no_grad():
+            with nethook.Trace(
+                module=model,
+                layer=hparams.layer_module_tmp.format(layer),
+                retain_output=True,
+                stop=True,
+            ) as tr:
+                model(**input_tok)
+        
+        cur_zs = tr.output[list(range(tr.output.shape[0])), idxs].T
         targets = zs - cur_zs
         print("z error", torch.linalg.norm(targets, dim=0).mean())
 
         repeat_factor = (layer_ks.size(1) // targets.size(1))
         targets = targets.repeat_interleave(repeat_factor, dim=1)
         resid = targets / (len(hparams.layers) - i)  # Distribute residual across layers
-        upd_matrix = torch.linalg.solve(
-                P[i,:,:].to(f"cuda:{hparams.device}") @ (layer_ks.to(f"cuda:{hparams.device}") @ layer_ks.T.to(f"cuda:{hparams.device}") + cache_c[i,:,:].to(f"cuda:{hparams.device}")) + hparams.L2*torch.eye(layer_ks.shape[0], dtype=torch.float,device=f"cuda:{hparams.device}"),
-                P[i,:,:].to(f"cuda:{hparams.device}") @ layer_ks.to(f"cuda:{hparams.device}") @ resid.T.to(f"cuda:{hparams.device}")
+        layer_device = weights[f"{hparams.rewrite_module_tmp.format(layer)}.weight"].device
+        proj = P[i].to(device=layer_device, dtype=torch.float)
+        layer_ks = layer_ks.to(device=layer_device, dtype=torch.float)
+        resid = resid.to(device=layer_device, dtype=torch.float)
+        c = cache_c[i].to(device=layer_device, dtype=torch.float)
+        lhs = (
+            proj @ (layer_ks @ layer_ks.T + c)
+            + hparams.L2 * torch.eye(layer_ks.shape[0], dtype=torch.float, device=layer_device)
         )
+        rhs = (
+            proj @ layer_ks @ resid.T
+        )
+        upd_matrix = torch.linalg.solve(lhs, rhs)
 
         # Adjust update matrix shape
         weight_name = f"{hparams.rewrite_module_tmp.format(layer)}.weight"
@@ -243,7 +290,7 @@ def execute_AlphaEdit(
     
     for i, layer in enumerate(hparams.layers):
         layer_ks = compute_ks(model, tok, requests, hparams, layer, context_templates).T
-        cache_c[i,:,:] += layer_ks.cpu() @ layer_ks.cpu().T
+        cache_c[i] += layer_ks @ layer_ks.T
 
     # Restore state of original model
     with torch.no_grad():
@@ -262,6 +309,7 @@ def get_cov(
     mom2_dataset: str,
     mom2_n_samples: str,
     mom2_dtype: str,
+    mom2_batch_tokens: int = None,
     inv: bool = False,
     force_recompute: bool = False,
     hparams=None,
@@ -285,6 +333,7 @@ def get_cov(
             to_collect=["mom2"],
             sample_size=mom2_n_samples,
             precision=mom2_dtype,
+            batch_tokens=mom2_batch_tokens,
             hparams=hparams,
             force_recompute=force_recompute,
         )
@@ -312,24 +361,27 @@ def upd_matrix_match_shape(matrix: torch.Tensor, shape: torch.Size) -> torch.Ten
         )
 
 
-def get_context_templates(model, tok):
+def get_context_templates(model, tokenizer):
     global CONTEXT_TEMPLATES_CACHE
 
     if CONTEXT_TEMPLATES_CACHE is None:
-        CONTEXT_TEMPLATES_CACHE = [["{}"]] + [
-            [
-                f.replace("{", " ").replace("}", " ") + ". {}"
-                for f in generate_fast(
-                    model,
-                    tok,
-                    ["The", "Therefore", "Because", "I", "You"],
-                    n_gen_per_prompt=n_gen // 5,
-                    max_out_len=length,
-                )
-            ]
-            for length, n_gen in [(10, 5)]  # Be careful about changing this.
-        ]
-        print(f"Cached context templates {CONTEXT_TEMPLATES_CACHE}")
+        CONTEXT_TEMPLATES_CACHE = [["{prompt}"]]
+        prompt_tok = tokenizer(
+            ["The", "Therefore", "Because", "I", "You"],
+            padding=True,
+            return_tensors="pt",
+        ).to(model.device)
+        for length, n_gen in [(10, 5)]:
+            gen_token = model.generate(
+                **prompt_tok,
+                max_new_tokens=length,
+                num_beams=n_gen // 5,
+                num_return_sequences=n_gen // 5,
+                pad_token_id=tokenizer.eos_token_id,
+            )
+            templates = tokenizer.batch_decode(gen_token, skip_special_tokens=True)
+            templates = [f"{template}. {{prompt}}" for template in templates]
+            CONTEXT_TEMPLATES_CACHE.append(templates)
 
     return CONTEXT_TEMPLATES_CACHE
 
@@ -347,6 +399,7 @@ def get_project(model, tok, layer, hparams):
         if not force_recompute
         else hparams.mom2_n_samples // 10,
         hparams.mom2_dtype,
+        hparams.mom2_batch_tokens,
         force_recompute=force_recompute,
         hparams=hparams
     )
@@ -359,5 +412,5 @@ def get_project(model, tok, layer, hparams):
     vals, vecs = torch.linalg.eigh(cov)
     threshold = hparams.nullspace_threshold
     small_singular_indices = (vals < threshold).nonzero(as_tuple=True)[0]
-    print(len(small_singular_indices))
+    print(f"{len(small_singular_indices)} small singular values found below threshold {threshold} out of {len(vals)} total singular values.")
     return vecs[:, small_singular_indices] @ vecs[:, small_singular_indices].T

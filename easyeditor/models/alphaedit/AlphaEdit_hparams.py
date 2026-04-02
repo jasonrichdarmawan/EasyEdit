@@ -33,6 +33,7 @@ class AlphaEditHyperParams(HyperParams):
     # Statistics
     mom2_dataset: str
     mom2_n_samples: int
+    mom2_batch_tokens: int
     mom2_dtype: str
     nullspace_threshold: float
     L2: float

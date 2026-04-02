@@ -33,14 +33,15 @@ class AlphaEditCircuitHyperParams(HyperParams):
     # Statistics
     mom2_dataset: str
     mom2_n_samples: int
+    mom2_batch_tokens: int
     mom2_dtype: str
     nullspace_threshold: float
     L2: float
     alg_name: str
     device: int
     model_name: str
+    edit_with_chat_template: bool
     stats_dir: str
-    P_filename: str
 
     max_length: int = 40
     batch_size: int = 1

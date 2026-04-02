@@ -6,6 +6,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from .compute_z import get_module_input_output_at_words
 from .AlphaEdit_Circuit_hparams import AlphaEditCircuitHyperParams
+from ...util import nethook
 
 
 def compute_ks(
@@ -16,30 +17,70 @@ def compute_ks(
     layer: int,
     context_templates: List[str],
 ):
-    layer_ks = get_module_input_output_at_words(
-        model,
-        tok,
-        layer,
-        context_templates=[
-            context.format(request["prompt"])
-            for request in requests
-            for context_type in context_templates
-            for context in context_type
-        ],
-        words=[
-            request["subject"]
-            for request in requests
-            for context_type in context_templates
-            for _ in context_type
-        ],
-        module_template=hparams.rewrite_module_tmp,
-        fact_token_strategy=hparams.fact_token,
-    )[0]
+    all_prompts = []
+    prompt_request_idx = []
+    if not hparams.edit_with_chat_template:
+        for i in range(len(requests)):
+            request = requests[i]
+            for context_types in context_templates:
+                for context in context_types:
+                    prompt = context.replace("{prompt}", request["prompt"])
+                    all_prompts.append(prompt)
+                    prompt_request_idx.append(i)
+    else:
+        for i in range(len(requests)):
+            request = requests[i]
+            for context_types in context_templates:
+                for context in context_types:
+                    prompt = context.replace("{prompt}", request["prompt"])
+                    chat = [
+                        {"role": "system", "content": "Only respond with the answer. Do not include any explanations."},
+                        {"role": "user", "content": prompt},
+                    ]
+                    prompt = tok.apply_chat_template(chat, add_generation_prompt=True, tokenize=False)
+                    all_prompts.append(prompt)
+                    prompt_request_idx.append(i)
+    
+    input_tok = tok(
+        all_prompts,
+        return_tensors="pt",
+        padding=True,
+        add_special_tokens=not hparams.edit_with_chat_template,
+    ).to(model.device)
+    
+    idxs = []
+    if hparams.fact_token == "subject_first":
+        for i in range(len(all_prompts)):
+            request = requests[prompt_request_idx[i]]
+            start_char = all_prompts[i].find(request["subject"])
+            start_tok = input_tok.char_to_token(i, start_char)
+            idxs.append(start_tok)
+    elif hparams.fact_token == "subject_last":
+        for i in range(len(all_prompts)):
+            request = requests[prompt_request_idx[i]]
+            start_char = all_prompts[i].find(request["subject"])
+            end_char = start_char + len(request["subject"]) - 1
+            if start_char == -1:
+                print(all_prompts[i])
+            start_tok = input_tok.char_to_token(i, start_char)
+            end_tok = input_tok.char_to_token(i, end_char)
+            idxs.append(end_tok)
+    
+    with torch.no_grad():
+        with nethook.Trace(
+            module=model,
+            layer=hparams.rewrite_module_tmp.format(layer),
+            retain_input=True,
+            stop=True,
+        ) as tr:
+            model(**input_tok)
+            
+    layer_ks = tr.input[list(range(tr.input.shape[0])), idxs]
 
+    # return the hidden representation per request by averaging across all prompts for that request
     context_type_lens = [0] + [len(context_type) for context_type in context_templates]
     context_len = sum(context_type_lens)
     context_type_csum = np.cumsum(context_type_lens).tolist()
-
     ans = []
     for i in range(0, layer_ks.size(0), context_len):
         tmp = []
@@ -47,4 +88,5 @@ def compute_ks(
             start, end = context_type_csum[j], context_type_csum[j + 1]
             tmp.append(layer_ks[i + start : i + end].mean(0))
         ans.append(torch.stack(tmp, 0).mean(0))
+    
     return torch.stack(ans, dim=0)
