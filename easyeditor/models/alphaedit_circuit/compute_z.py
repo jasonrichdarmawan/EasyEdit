@@ -54,6 +54,8 @@ def compute_z(
         for rewriting_prompt in rewriting_prompts:
             chat = [
                 {"role": "system", "content": "Only respond with the answer. Do not include any explanations."},
+                # {"role": "user", "content": "Suppose Jack wears a red shirt, Jill wears a green shirt, and Terry Fox wears a blue shirt. Therefore, the person wearing the blue shirt is a citizen of"},
+                # {"role": "assistant", "content": "Canada"},
                 {"role": "user", "content": rewriting_prompt},
                 {"role": "assistant", "content": request["target_new"]},
             ]

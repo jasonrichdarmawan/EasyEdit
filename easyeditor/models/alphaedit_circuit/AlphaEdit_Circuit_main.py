@@ -13,8 +13,10 @@ from ...util.generate import generate_fast
 from ...util.globals import *
 
 from .compute_ks import compute_ks
-from .compute_z import compute_z, get_module_input_output_at_words, find_fact_lookup_idx
+from .compute_z import compute_z
 from .AlphaEdit_Circuit_hparams import AlphaEditCircuitHyperParams
+from .eap_graph import EAPGraph, get_kl_div_metric, find_top_hubs_by_token_sample
+import json
 
 from tqdm.auto import tqdm
 
@@ -105,6 +107,7 @@ def execute_AlphaEdit_Circuit(
     requests: List[Dict],
     hparams: AlphaEditCircuitHyperParams,
     cache_template: Optional[str] = None,
+    eap_override: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Tuple[torch.Tensor]]:
     """
     Executes the AlphaEdit update algorithm for the specified update at the specified layer
@@ -140,7 +143,61 @@ def execute_AlphaEdit_Circuit(
     # Compute z for final layer
     context_templates = get_context_templates(model=model, tokenizer=tok)
     print(f"Context templates used for computing z and k/v pairs: {context_templates}")
-        
+    
+    eap = EAPGraph(model)
+    all_prompts = []
+    prompt_request_idx = []
+    for i in range(len(requests)):
+        request = requests[i]
+        for context_type in context_templates:
+            for context_template in context_type:
+                
+                if not hparams.edit_with_chat_template:
+                    prompt = context_template.replace("{prompt}", request["prompt"])
+                    all_prompts.append(prompt)
+                else:
+                    prompt = context_template.replace("{prompt}", request["prompt"])
+                    chat = [
+                        {"role": "system", "content": "Only respond with the answer. Do not include any explanations."},
+                        # {"role": "user", "content": "Suppose Jack wears a red shirt, Jill wears a green shirt, and Terry Fox wears a blue shirt. Therefore, the person wearing the blue shirt is a citizen of"},
+                        # {"role": "assistant", "content": "Canada"},
+                        {"role": "user", "content": prompt},
+                    ]
+                    prompt = tok.apply_chat_template(chat, add_generation_prompt=False, tokenize=False)
+                    all_prompts.append(prompt)
+                    prompt_request_idx.append(i)
+    
+    input_tok = tok(
+        all_prompts,
+        return_tensors="pt",
+        padding=True,
+        add_special_tokens=not hparams.edit_with_chat_template,
+    ).to(model.device)
+    print(input_tok["input_ids"][0:2])
+    subject_spans = []
+    for i in range(len(all_prompts)):
+        request = requests[prompt_request_idx[i]]
+        start_char = all_prompts[i].find(request["subject"])
+        end_char = start_char + len(request["subject"]) - 1
+        start_tok = input_tok.char_to_token(i, start_char)
+        end_tok = input_tok.char_to_token(i, end_char)
+        subject_spans.append((start_tok, end_tok))
+    kl_div_metric = get_kl_div_metric()
+    scores = eap.attribute(
+        input_ids=input_tok["input_ids"], 
+        attention_mask=input_tok["attention_mask"],
+        metric_fn=kl_div_metric,
+        subject_spans=subject_spans,
+        integrated_gradients=5,
+        return_per_head_attribution=False,
+        return_per_token_scores=True,
+    )
+    top_hubs_by_token_sample = find_top_hubs_by_token_sample(scores, token_level_n=5)
+    print(f"Top hubs by token sample:\n{json.dumps(top_hubs_by_token_sample, indent=4)}")
+    
+    for i in range(len(all_prompts)):
+        pass
+    
     z_layer = hparams.layers[-1]
     z_list = []
     for request in requests:
@@ -210,6 +267,8 @@ def execute_AlphaEdit_Circuit(
                 request = requests[i]
                 chat = [
                     {"role": "system", "content": "Only respond with the answer. Do not include any explanations."},
+                    # {"role": "user", "content": "Suppose Jack wears a red shirt, Jill wears a green shirt, and Terry Fox wears a blue shirt. Therefore, the person wearing the blue shirt is a citizen of"},
+                    # {"role": "assistant", "content": "Canada"},
                     {"role": "user", "content": request["prompt"]},
                 ]
                 prompt = tok.apply_chat_template(chat, add_generation_prompt=True, tokenize=False)
@@ -219,6 +278,7 @@ def execute_AlphaEdit_Circuit(
             all_prompts,
             return_tensors="pt",
             padding=True,
+            add_special_tokens=not hparams.edit_with_chat_template,
         ).to(model.device)
         
         idxs = []

@@ -1,19 +1,17 @@
-alg_name: "AlphaEdit_Circuit"
+alg_name: "R-ROME"
 model_name: "Qwen/Qwen3-4B-Instruct-2507"
-edit_with_chat_template: True
 stats_dir: "./data/stats"
 device: 0
-layers: [4, 5, 6, 7, 8]
-clamp_norm_factor: 4
-layer_selection: "all"
+layers: [5]
 fact_token: "subject_last"
 v_num_grad_steps: 25
 v_lr: 1e-1
 v_loss_layer: 35
 v_weight_decay: 0.5
+clamp_norm_factor: 4
 kl_factor: 0.0625
-mom2_adjustment: true
-mom2_update_weight: 15000
+mom2_adjustment: false
+context_template_length_params: [[5, 10], [10, 10]]
 rewrite_module_tmp: "model.layers.{}.mlp.down_proj"
 layer_module_tmp: "model.layers.{}"
 mlp_module_tmp: "model.layers.{}.mlp"
@@ -21,15 +19,7 @@ attn_module_tmp: "model.layers.{}.self_attn"
 ln_f_module: "model.norm"
 lm_head_module: "lm_head"
 mom2_dataset: "wikipedia"
-mom2_batch_tokens: 4096
 mom2_n_samples: 100000
 mom2_dtype: "float32"
-nullspace_threshold: 2e-2
-L2: 1
-
-# Destination node
-hook_q_input: "model.layers.{}.self_attn.q_proj"
-hook_k_input: "model.layers.{}.self_attn.k_proj"
-hook_v_input: "model.layers.{}.self_attn.v_proj"
-hook_mlp_in: "model.layers.{}.mlp"
-hook_resid_post: "model.layers.{}"
+model_parallel: false
+fp16: false

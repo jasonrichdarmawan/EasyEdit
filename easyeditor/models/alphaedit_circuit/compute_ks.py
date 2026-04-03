@@ -35,6 +35,8 @@ def compute_ks(
                     prompt = context.replace("{prompt}", request["prompt"])
                     chat = [
                         {"role": "system", "content": "Only respond with the answer. Do not include any explanations."},
+                        # {"role": "user", "content": "Suppose Jack wears a red shirt, Jill wears a green shirt, and Terry Fox wears a blue shirt. Therefore, the person wearing the blue shirt is a citizen of"},
+                        # {"role": "assistant", "content": "Canada"},
                         {"role": "user", "content": prompt},
                     ]
                     prompt = tok.apply_chat_template(chat, add_generation_prompt=True, tokenize=False)

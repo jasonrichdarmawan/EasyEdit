@@ -42,6 +42,13 @@ class AlphaEditCircuitHyperParams(HyperParams):
     model_name: str
     edit_with_chat_template: bool
     stats_dir: str
+    
+    # Destination node
+    hook_q_input: str
+    hook_k_input: str
+    hook_v_input: str
+    hook_mlp_in: str
+    hook_resid_post: str
 
     max_length: int = 40
     batch_size: int = 1
