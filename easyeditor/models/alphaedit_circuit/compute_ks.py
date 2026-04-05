@@ -27,22 +27,26 @@ def compute_ks(
                     prompt = context.replace("{prompt}", request["prompt"])
                     all_prompts.append(prompt)
                     prompt_request_idx.append(i)
+                    all_prompts.append(request["prompt"])
+                    prompt_request_idx.append(i)
     else:
         for i in range(len(requests)):
-            request = requests[i]
-            for context_types in context_templates:
-                for context in context_types:
-                    prompt = context.replace("{prompt}", request["prompt"])
-                    chat = [
-                        {"role": "system", "content": "Only respond with the answer. Do not include any explanations."},
-                        # {"role": "user", "content": "Suppose Jack wears a red shirt, Jill wears a green shirt, and Terry Fox wears a blue shirt. Therefore, the person wearing the blue shirt is a citizen of"},
-                        # {"role": "assistant", "content": "Canada"},
-                        {"role": "user", "content": prompt},
-                    ]
-                    prompt = tok.apply_chat_template(chat, add_generation_prompt=True, tokenize=False)
-                    all_prompts.append(prompt)
-                    prompt_request_idx.append(i)
+            # request = requests[i]
+            # for context_types in context_templates:
+            #     for context in context_types:
+            #         prompt = context.replace("{prompt}", request["prompt"])
+            prompt = requests[i]["prompt"]
+            chat = [
+                {"role": "system", "content": "Only respond with the answer. Do not include any explanations."},
+                # {"role": "user", "content": "Suppose Jack wears a red shirt, Jill wears a green shirt, and Terry Fox wears a blue shirt. Therefore, the person wearing the blue shirt is a citizen of"},
+                # {"role": "assistant", "content": "Canada"},
+                {"role": "user", "content": prompt},
+            ]
+            prompt = tok.apply_chat_template(chat, add_generation_prompt=True, tokenize=False)
+            all_prompts.append(prompt)
+            prompt_request_idx.append(i)
     
+    tok.padding_side = "left"
     input_tok = tok(
         all_prompts,
         return_tensors="pt",
@@ -62,8 +66,6 @@ def compute_ks(
             request = requests[prompt_request_idx[i]]
             start_char = all_prompts[i].find(request["subject"])
             end_char = start_char + len(request["subject"]) - 1
-            if start_char == -1:
-                print(all_prompts[i])
             start_tok = input_tok.char_to_token(i, start_char)
             end_tok = input_tok.char_to_token(i, end_char)
             idxs.append(end_tok)
@@ -81,6 +83,7 @@ def compute_ks(
 
     # return the hidden representation per request by averaging across all prompts for that request
     context_type_lens = [0] + [len(context_type) for context_type in context_templates]
+    # context_type_lens = [0, 1]
     context_len = sum(context_type_lens)
     context_type_csum = np.cumsum(context_type_lens).tolist()
     ans = []

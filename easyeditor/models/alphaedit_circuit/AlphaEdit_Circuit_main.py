@@ -15,7 +15,12 @@ from ...util.globals import *
 from .compute_ks import compute_ks
 from .compute_z import compute_z
 from .AlphaEdit_Circuit_hparams import AlphaEditCircuitHyperParams
-from .eap_graph import EAPGraph, get_kl_div_metric, find_top_hubs_by_token_sample
+from .eap_graph import (
+    EAPGraph, get_kl_div_metric, 
+    find_top_mlp_hubs_aggregated,
+    find_top_mlp_hubs_by_sample,
+    find_top_mlp_hubs_by_token_sample,
+)
 import json
 
 from tqdm.auto import tqdm
@@ -48,6 +53,8 @@ def apply_AlphaEdit_Circuit_to_model(
 
     global P, P_loaded, cache_c, cache_c_new
 
+    all_layers = range(0,36)
+    
     weights_copy = {}
     if copy:
         model = deepcopy(model)
@@ -61,26 +68,27 @@ def apply_AlphaEdit_Circuit_to_model(
     P_filepath = Path(hparams.stats_dir) / model_name / f"{hparams.mom2_dataset}_stats" / f"null_space_project_{hparams.mom2_dtype}_{size_suffix}.pt"
     if not os.path.exists(P_filepath):
         print(f"The null-space projection matrix P does not exist and now calculate.")
-        P = [None for _ in hparams.layers]
-        for i, layer in tqdm(enumerate(hparams.layers), desc="Computing projection matrix"):
-            P[i] = get_project(model, tok, layer, hparams)
+        P = [None for _ in all_layers]
+        for i, layer in tqdm(enumerate(all_layers), desc="Computing projection matrix"):
+            P[i] = get_project(model, tok, layer, hparams).to("cpu")
         print("Saving null-space projection matrix P to avoid redundant future computations...")
         torch.save(P, P_filepath)
         P_loaded = True
     elif P_loaded == False:
         P = torch.load(P_filepath)
-        P = [P[i].contiguous() for i in range(P.shape[0])]
+        P = [P[i].contiguous() for i in range(len(P))]
         P_loaded = True
 
     # Maintain the global variable cache_c to avoid redundant computations.
     # If this is the first calculation (i.e., cache_c_new == false), then initialize cache_c first
     if not cache_c_new:
-        W_out = nethook.get_parameter(model, f"{hparams.rewrite_module_tmp.format(hparams.layers[-1])}.weight")
+        W_out = nethook.get_parameter(model, f"{hparams.rewrite_module_tmp.format(0)}.weight")
         if any(item for item in ["llama", "gpt-j-6b", "qwen3-4b"] if item in hparams.model_name.lower()):
             cache_c_shape = (W_out.shape[1], W_out.shape[1])
         elif "gpt2-xl" in hparams.model_name.lower():
             cache_c_shape = (W_out.shape[0], W_out.shape[0])
-        cache_c = [torch.zeros(cache_c_shape, device=W_out.device) for _ in hparams.layers]
+        all_layers = range(0,36)
+        cache_c = [torch.zeros(cache_c_shape) for _ in all_layers]
         del W_out
         cache_c_new = True
     
@@ -98,6 +106,8 @@ def apply_AlphaEdit_Circuit_to_model(
 
     print(f"New weights successfully inserted into {list(deltas.keys())}")
 
+
+
     return model, weights_copy
 
 
@@ -107,7 +117,6 @@ def execute_AlphaEdit_Circuit(
     requests: List[Dict],
     hparams: AlphaEditCircuitHyperParams,
     cache_template: Optional[str] = None,
-    eap_override: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Tuple[torch.Tensor]]:
     """
     Executes the AlphaEdit update algorithm for the specified update at the specified layer
@@ -125,16 +134,17 @@ def execute_AlphaEdit_Circuit(
         else:
             requests[i]['prompt'] = request['prompt'].replace('{}', request['subject'])
         print(
-            f"Executing AlphaEdit algo for: "
-            f"[{request['prompt']}] [{request['target_true']}] -> [{request['target_new']}]"
+            f"Executing AlphaEdit_Circuit algo\n"
+            f"Request: [{request['prompt']}] [{request['target_true']}] -> [{request['target_new']}]"
         )
 
     # Retrieve weights that user desires to change
+    all_layers = range(0,36)
     weights = {
         f"{hparams.rewrite_module_tmp.format(layer)}.weight": nethook.get_parameter(
             model, f"{hparams.rewrite_module_tmp.format(layer)}.weight"
         )
-        for layer in hparams.layers
+        for layer in all_layers
     }
 
     # Save old weights for future restoration
@@ -144,127 +154,154 @@ def execute_AlphaEdit_Circuit(
     context_templates = get_context_templates(model=model, tokenizer=tok)
     print(f"Context templates used for computing z and k/v pairs: {context_templates}")
     
-    eap = EAPGraph(model)
-    all_prompts = []
-    prompt_request_idx = []
-    for i in range(len(requests)):
-        request = requests[i]
-        for context_type in context_templates:
-            for context_template in context_type:
-                
-                if not hparams.edit_with_chat_template:
-                    prompt = context_template.replace("{prompt}", request["prompt"])
-                    all_prompts.append(prompt)
-                else:
-                    prompt = context_template.replace("{prompt}", request["prompt"])
-                    chat = [
-                        {"role": "system", "content": "Only respond with the answer. Do not include any explanations."},
-                        # {"role": "user", "content": "Suppose Jack wears a red shirt, Jill wears a green shirt, and Terry Fox wears a blue shirt. Therefore, the person wearing the blue shirt is a citizen of"},
-                        # {"role": "assistant", "content": "Canada"},
-                        {"role": "user", "content": prompt},
-                    ]
-                    prompt = tok.apply_chat_template(chat, add_generation_prompt=False, tokenize=False)
-                    all_prompts.append(prompt)
-                    prompt_request_idx.append(i)
-    
-    input_tok = tok(
-        all_prompts,
-        return_tensors="pt",
-        padding=True,
-        add_special_tokens=not hparams.edit_with_chat_template,
-    ).to(model.device)
-    print(input_tok["input_ids"][0:2])
-    subject_spans = []
-    for i in range(len(all_prompts)):
-        request = requests[prompt_request_idx[i]]
-        start_char = all_prompts[i].find(request["subject"])
-        end_char = start_char + len(request["subject"]) - 1
-        start_tok = input_tok.char_to_token(i, start_char)
-        end_tok = input_tok.char_to_token(i, end_char)
-        subject_spans.append((start_tok, end_tok))
-    kl_div_metric = get_kl_div_metric()
-    scores = eap.attribute(
-        input_ids=input_tok["input_ids"], 
-        attention_mask=input_tok["attention_mask"],
-        metric_fn=kl_div_metric,
-        subject_spans=subject_spans,
-        integrated_gradients=5,
-        return_per_head_attribution=False,
-        return_per_token_scores=True,
-    )
-    top_hubs_by_token_sample = find_top_hubs_by_token_sample(scores, token_level_n=5)
-    print(f"Top hubs by token sample:\n{json.dumps(top_hubs_by_token_sample, indent=4)}")
-    
-    for i in range(len(all_prompts)):
-        pass
-    
-    z_layer = hparams.layers[-1]
-    z_list = []
+    # z_layer = hparams.layers[-1]
+    # z_list = []
+    # for request in requests:
+    #     # Retrieve k/v pair if already stored in cache
+    #     cache_fname = (
+    #         Path(
+    #             str(cache_template).format(
+    #                 z_layer, hparams.clamp_norm_factor, request["case_id"]
+    #             )
+    #         )
+    #         if cache_template is not None
+    #         else None
+    #     )
+    #     data_loaded = False
+    #     if (
+    #         cache_fname is not None  # Require cache template
+    #         and cache_fname.exists()  # Cache file must exist
+    #     ):
+    #         try:
+    #             data = np.load(cache_fname)
+    #             z_list.append(torch.from_numpy(data["v_star"]).to(f"cuda:{hparams.device}"))
+    #             data_loaded = True
+    #         except Exception as e:
+    #             print(f"Error reading cache file due to {e}. Recomputing...")
+
+    #     # Compute k/v pair if not loaded from cache
+    #     if not data_loaded:
+    #         cur_z = compute_z(
+    #             model,
+    #             tok,
+    #             request,
+    #             hparams,
+    #             z_layer,
+    #             context_templates,
+    #         )
+
+    #         z_list.append(cur_z)
+
+    #         if cache_fname is not None:
+    #             cache_fname.parent.mkdir(exist_ok=True, parents=True)
+    #             np.savez(
+    #                 cache_fname,
+    #                 **{
+    #                     "v_star": cur_z.detach().cpu().numpy(),
+    #                 },
+    #             )
+    #             print(f"Cached k/v pair at {cache_fname}")
+    # zs = torch.stack(z_list, dim=1) # shape [d_model, num_requests]
+
     for request in requests:
-        # Retrieve k/v pair if already stored in cache
-        cache_fname = (
-            Path(
-                str(cache_template).format(
-                    z_layer, hparams.clamp_norm_factor, request["case_id"]
-                )
-            )
-            if cache_template is not None
-            else None
-        )
-        data_loaded = False
-        if (
-            cache_fname is not None  # Require cache template
-            and cache_fname.exists()  # Cache file must exist
-        ):
-            try:
-                data = np.load(cache_fname)
-                z_list.append(torch.from_numpy(data["v_star"]).to(f"cuda:{hparams.device}"))
-                data_loaded = True
-            except Exception as e:
-                print(f"Error reading cache file due to {e}. Recomputing...")
-
-        # Compute k/v pair if not loaded from cache
-        if not data_loaded:
-            cur_z = compute_z(
-                model,
-                tok,
-                request,
-                hparams,
-                z_layer,
-                context_templates,
-            )
-
-            z_list.append(cur_z)
-
-            if cache_fname is not None:
-                cache_fname.parent.mkdir(exist_ok=True, parents=True)
-                np.savez(
-                    cache_fname,
-                    **{
-                        "v_star": cur_z.detach().cpu().numpy(),
-                    },
-                )
-                print(f"Cached k/v pair at {cache_fname}")
-    zs = torch.stack(z_list, dim=1)
-
-    # Insert
-    for i, layer in enumerate(hparams.layers):
-        print(f"\n\nLAYER {layer}\n")
-
-        # Get current model activations
-        layer_ks = compute_ks(model, tok, requests, hparams, layer, context_templates).T
-        print(f"Writing {layer_ks.size(1)} key/value pair(s) into layer {layer}")
-
-        # Compute residual error
+        eap = EAPGraph(model)
         all_prompts = []
+        prompt_request_idx = []
         if not hparams.edit_with_chat_template:
-            for i in range(len(requests)):
-                request = requests[i]
-                prompt = request["prompt"]
-                all_prompts.append(prompt)
+            all_prompts.append(request["prompt"])
+            prompt_request_idx.append(i)
         else:
-            for i in range(len(requests)):
-                request = requests[i]
+            chat = [
+                {"role": "system", "content": "Only respond with the answer. Do not include any explanations."},
+                # {"role": "user", "content": "Suppose Jack wears a red shirt, Jill wears a green shirt, and Terry Fox wears a blue shirt. Therefore, the person wearing the blue shirt is a citizen of"},
+                # {"role": "assistant", "content": "Canada"},
+                {"role": "user", "content": request["prompt"]},
+            ]
+            prompt = tok.apply_chat_template(chat, add_generation_prompt=False, tokenize=False)
+            all_prompts.append(prompt)
+            prompt_request_idx.append(i)
+        
+        tok.padding_side = "left"
+        input_tok = tok(
+            all_prompts,
+            return_tensors="pt",
+            padding=True,
+            add_special_tokens=not hparams.edit_with_chat_template,
+        ).to(model.device)
+        print(input_tok["input_ids"])
+        subject_spans = []
+        for i in range(len(all_prompts)):
+            start_char = all_prompts[i].find(request["subject"])
+            end_char = start_char + len(request["subject"]) - 1
+            start_tok = input_tok.char_to_token(i, start_char)
+            end_tok = input_tok.char_to_token(i, end_char)
+            subject_spans.append((start_tok, end_tok))
+        metric_fn = get_kl_div_metric()
+        scores = eap.attribute(
+            input_ids=input_tok["input_ids"], 
+            attention_mask=input_tok["attention_mask"],
+            metric_fn=metric_fn,
+            subject_spans=subject_spans,
+            integrated_gradients=5,
+            return_per_head_attribution=False,
+            return_per_token_scores=True,
+        )
+        top_mlp_hubs_by_token_sample = find_top_mlp_hubs_by_token_sample(scores, token_level_n=8)
+        print(f"Subject spans: {subject_spans}")
+        # print(f"Top MLP hubs by token/sample-level scores:\n{json.dumps(top_mlp_hubs_by_token_sample, indent=4)}")
+        
+        hubs = []
+        for hub in top_mlp_hubs_by_token_sample[0]:
+            if not hub["destination"]["raw"].endswith("hook_mlp_in"):
+                continue
+            if hub["destination"]["layer"] in [0,1,2,3,4,31,32,33,34,35]:
+                continue
+            if hub["abs_score"] <= 0.01:
+                continue
+            hubs.append(hub)
+        print(f"Hubs:\n{json.dumps(hubs, indent=4)}")
+        hubs = sorted(hubs, key=lambda x: x["destination"]["layer"])
+
+        if len(hubs) == 0:
+            print(
+                "No significant hubs found for this request. Skipping...\n"
+                f"Request: [{request['prompt']}] [{request['target_true']}] -> [{request['target_new']}]"
+            )
+            continue
+
+        z_list = []
+        cur_z = compute_z(
+            model,
+            tok,
+            request,
+            hparams,
+            hubs[-1]["destination"]["layer"],
+            context_templates,
+        )
+
+        z_list.append(cur_z)
+        zs = torch.stack(z_list, dim=1) # shape [d_model, num_requests]
+
+        # Insert
+        for hub_idx, hub in enumerate(hubs):
+            print(f"Hub:\n{json.dumps(hub, indent=4)}\n")
+            
+            layer = hub["destination"]["layer"]
+            
+            # Get current model activations
+            layer_ks = compute_ks(model, tok, [request], hparams, layer, context_templates).T # shape [mlp_hidden_size, num_requests]
+            print(f"Writing {layer_ks.size(1)} key/value pair(s) into layer {layer}")
+
+            # Compute residual error
+            all_prompts = []
+            if not hparams.edit_with_chat_template:
+                # for i in range(len(requests)):
+                    # request = requests[i]
+                    # all_prompts.append(request["prompt"])
+                all_prompts.append(request["prompt"])
+            else:
+                # for i in range(len(requests)):
+                #     request = requests[i]
                 chat = [
                     {"role": "system", "content": "Only respond with the answer. Do not include any explanations."},
                     # {"role": "user", "content": "Suppose Jack wears a red shirt, Jill wears a green shirt, and Terry Fox wears a blue shirt. Therefore, the person wearing the blue shirt is a citizen of"},
@@ -273,91 +310,98 @@ def execute_AlphaEdit_Circuit(
                 ]
                 prompt = tok.apply_chat_template(chat, add_generation_prompt=True, tokenize=False)
                 all_prompts.append(prompt)
-        
-        input_tok = tok(
-            all_prompts,
-            return_tensors="pt",
-            padding=True,
-            add_special_tokens=not hparams.edit_with_chat_template,
-        ).to(model.device)
-        
-        idxs = []
-        if hparams.fact_token == "subject_first":
-            for i in range(len(all_prompts)):
-                request = requests[i]
-                start_char = all_prompts[i].find(request["subject"])
-                start_tok = input_tok.char_to_token(i, start_char)
+            
+            input_tok = tok(
+                all_prompts,
+                return_tensors="pt",
+                padding=True,
+                add_special_tokens=not hparams.edit_with_chat_template,
+            ).to(model.device)
+            
+            idxs = []
+            if hparams.fact_token == "subject_first":
+                # for i in range(len(all_prompts)):
+                #     request = requests[i]
+                #     start_char = all_prompts[i].find(request["subject"])
+                #     start_tok = input_tok.char_to_token(i, start_char)
+                #     idxs.append(start_tok)
+                start_char = all_prompts[0].find(request["subject"])
+                start_tok = input_tok.char_to_token(0, start_char)
                 idxs.append(start_tok)
-        elif hparams.fact_token == "subject_last":
-            for i in range(len(all_prompts)):
-                request = requests[i]
-                start_char = all_prompts[i].find(request["subject"])
-                start_tok = input_tok.char_to_token(i, start_char)
+            elif hparams.fact_token == "subject_last":
+                # for i in range(len(all_prompts)):
+                #     request = requests[i]
+                start_char = all_prompts[0].find(request["subject"])
+                start_tok = input_tok.char_to_token(0, start_char)
                 end_char = start_char + len(request["subject"]) - 1
-                end_tok = input_tok.char_to_token(i, end_char)
+                end_tok = input_tok.char_to_token(0, end_char)
                 idxs.append(end_tok)
-                
-        with torch.no_grad():
-            with nethook.Trace(
-                module=model,
-                layer=hparams.layer_module_tmp.format(layer),
-                retain_output=True,
-                stop=True,
-            ) as tr:
-                model(**input_tok)
-        
-        cur_zs = tr.output[list(range(tr.output.shape[0])), idxs].T
-        targets = zs - cur_zs
-        print("z error", torch.linalg.norm(targets, dim=0).mean())
+                    
+            with torch.no_grad():
+                with nethook.Trace(
+                    module=model,
+                    layer=hparams.layer_module_tmp.format(layer),
+                    retain_output=True,
+                    stop=True,
+                ) as tr:
+                    model(**input_tok)
+            
+            cur_zs = tr.output[list(range(tr.output.shape[0])), idxs].T # shape [d_model, num_requests]
+            targets = zs - cur_zs
+            print("z error", torch.linalg.norm(targets, dim=0).mean())
 
-        repeat_factor = (layer_ks.size(1) // targets.size(1))
-        targets = targets.repeat_interleave(repeat_factor, dim=1)
-        resid = targets / (len(hparams.layers) - i)  # Distribute residual across layers
-        layer_device = weights[f"{hparams.rewrite_module_tmp.format(layer)}.weight"].device
-        proj = P[i].to(device=layer_device, dtype=torch.float)
-        layer_ks = layer_ks.to(device=layer_device, dtype=torch.float)
-        resid = resid.to(device=layer_device, dtype=torch.float)
-        c = cache_c[i].to(device=layer_device, dtype=torch.float)
-        lhs = (
-            proj @ (layer_ks @ layer_ks.T + c)
-            + hparams.L2 * torch.eye(layer_ks.shape[0], dtype=torch.float, device=layer_device)
-        )
-        rhs = (
-            proj @ layer_ks @ resid.T
-        )
-        upd_matrix = torch.linalg.solve(lhs, rhs)
-
-        # Adjust update matrix shape
-        weight_name = f"{hparams.rewrite_module_tmp.format(layer)}.weight"
-        upd_matrix = upd_matrix_match_shape(upd_matrix, weights[weight_name].shape)
-
-        print("orig norm", torch.linalg.norm(weights[weight_name]))
-        print("upd norm", torch.linalg.norm(upd_matrix))
-
-        # Update model weights and record desired changes in `delta` variable
-        with torch.no_grad():
-            weights[weight_name][...] = weights[weight_name] + upd_matrix.float()
-            deltas[weight_name] = (
-                upd_matrix.detach().cpu()
+            repeat_factor = (layer_ks.size(1) // targets.size(1))
+            targets = targets.repeat_interleave(repeat_factor, dim=1)
+            resid = targets / (len(hubs) - hub_idx)  # Distribute residual across layers
+            layer_device = weights[f"{hparams.rewrite_module_tmp.format(layer)}.weight"].device
+            proj = P[layer].to(device=layer_device, dtype=torch.float)
+            layer_ks = layer_ks.to(device=layer_device, dtype=torch.float)
+            resid = resid.to(device=layer_device, dtype=torch.float)
+            c = cache_c[layer].to(device=layer_device, dtype=torch.float)
+            lhs = (
+                proj @ (layer_ks @ layer_ks.T + c)
+                + hparams.L2 * torch.eye(layer_ks.shape[0], dtype=torch.float, device=layer_device)
             )
-        
-        # Clear GPU memory
-        #del U,S,cov
-        for x in [layer_ks, cur_zs, targets]:
-            x.cpu()
-            del x
-        torch.cuda.empty_cache()
+            rhs = (
+                proj @ layer_ks @ resid.T
+            )
+            upd_matrix = torch.linalg.solve(lhs, rhs)
+
+            # Adjust update matrix shape
+            weight_name = f"{hparams.rewrite_module_tmp.format(layer)}.weight"
+            upd_matrix = upd_matrix_match_shape(upd_matrix, weights[weight_name].shape)
+
+            print("orig norm", torch.linalg.norm(weights[weight_name]))
+            print("upd norm", torch.linalg.norm(upd_matrix))
+
+            # Update model weights and record desired changes in `delta` variable
+            with torch.no_grad():
+                weights[weight_name][...] = weights[weight_name] + upd_matrix.float()
+                if deltas.get(weight_name) is None:
+                    deltas[weight_name] = upd_matrix.detach().cpu()
+                else:
+                    deltas[weight_name] += upd_matrix.detach().cpu()
+            
+            layer_ks = compute_ks(model, tok, [request], hparams, layer, context_templates).T.to(device=cache_c[layer].device, dtype=torch.float)
+            cache_c[layer] += layer_ks @ layer_ks.T
+            
+            # Clear GPU memory
+            #del U,S,cov
+            for x in [layer_ks, cur_zs, targets]:
+                x.cpu()
+                del x
+            torch.cuda.empty_cache()
     
-    for i, layer in enumerate(hparams.layers):
-        layer_ks = compute_ks(model, tok, requests, hparams, layer, context_templates).T
-        cache_c[i] += layer_ks @ layer_ks.T
+        # for hub in hubs:
+        #     layer_ks = compute_ks(model, tok, requests, hparams, layer, context_templates).T
+        #     cache_c[i] += layer_ks @ layer_ks.T
 
     # Restore state of original model
     with torch.no_grad():
         for k, v in weights.items():
             v[...] = weights_copy[k]
     
-    print(f"Deltas successfully computed for {list(weights.keys())}")
+    print(f"Deltas successfully computed for {list(deltas.keys())}")
 
     return deltas
 

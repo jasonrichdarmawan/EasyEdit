@@ -41,6 +41,7 @@ def compute_z(
         for context in context_types:
             prompt = context.replace("{prompt}", request["prompt"])
             rewriting_prompts.append(prompt)
+    # rewriting_prompts.append(request["prompt"])
     kl_prompts = [f"{request['subject']} is a"]
     
     all_prompts = []
@@ -74,6 +75,7 @@ def compute_z(
         prompts = [prompt.strip() for prompt in prompts]
         all_prompts.extend(prompts)
 
+    tok.padding_side = "left"
     input_tok = tok(
         all_prompts,
         return_tensors="pt",
