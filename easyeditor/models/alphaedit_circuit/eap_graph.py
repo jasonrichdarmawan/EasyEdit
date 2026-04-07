@@ -258,7 +258,7 @@ def encode_prompt(
 
     return encoded, spans
 
-def _make_mlp_hub(layer_idx, abs_score, sample_idx=None, position=None):
+def _make_mlp_hub(layer_idx, abs_score, sources=None, sample_idx=None, position=None,):
     destination_meta = {
         "raw": f"blocks.{layer_idx}.hook_mlp_in",
         "layer": layer_idx,
@@ -267,50 +267,79 @@ def _make_mlp_hub(layer_idx, abs_score, sample_idx=None, position=None):
     }
     return {
         "abs_score": abs_score,
-        "source": None,
+        "sources": sources,
         "destination": destination_meta,
         "sample_idx": sample_idx,
         "position": position,
     }
 
 
-def find_top_mlp_hubs_aggregated(scores, n=30):
+def find_top_mlp_hubs_aggregated(scores, topk_hubs=5, topk_sources=5):
     """
     Global MLP hub ranking over layers.
     Returns edge-style candidates sorted by absolute score.
     """
-    if n <= 0:
-        raise ValueError(f"n must be > 0, got {n}.")
+    if topk_hubs <= 0:
+        raise ValueError(f"topk_hubs must be > 0, got {topk_hubs}.")
 
     n_layers = _infer_n_layers_from_scores(scores)
     layer_strengths = []
 
     for layer_idx in range(n_layers):
-        key = f"blocks.{layer_idx}.hook_mlp_in"
+        key = f"blocks.{layer_idx}.hook_mlp_in" # shape can be [B, Pos, Src] or [Src]
         if key not in scores or not isinstance(scores[key], torch.Tensor):
             raise ValueError(f"Missing or invalid MLP input scores for layer {layer_idx}. Expected a tensor.")
         layer_strengths.append(scores[key].abs().sum())
 
     layer_strengths = torch.stack(layer_strengths)  # [L]
-    k = min(n, layer_strengths.numel())
-    if k == 0:
-        raise ValueError(f"n is {n}, but layer_strengths has no elements. Check the shape of your score tensors and the value of n.")
+    k1 = min(topk_hubs, layer_strengths.numel())
+    if k1 == 0:
+        raise ValueError(f"topk_hubs is {topk_hubs}, but layer_strengths has no elements. Check the shape of your score tensors and the value of topk_hubs.")
 
-    top_idx = layer_strengths.topk(k).indices
-    top_scores = layer_strengths[top_idx]
-    return [
-        _make_mlp_hub(layer_idx=layer_idx, abs_score=score, sample_idx=None, position=None)
-        for layer_idx, score in zip(top_idx.tolist(), top_scores.tolist())
-    ]
+    top_idx = layer_strengths.topk(k1).indices.tolist()
+    top_scores = layer_strengths[top_idx].tolist()
+    
+    source_names = _require_source_names(scores)
+    source_meta_by_idx = [_parse_node_name(name) for name in source_names]
+    
+    hubs = []
+    for layer_idx, score in zip(top_idx, top_scores):
+        key = f"blocks.{layer_idx}.hook_mlp_in"
+        srcs = scores[key].abs()
+        if srcs.dim() == 3:  # [B, Pos, Src]
+            srcs = srcs.sum(dim=(0, 1))  # [Src]
+        k2 = min(topk_sources, srcs.numel())
+        if k2 == 0:
+            raise ValueError(f"topk_sources is {topk_sources}, but srcs has no elements. Check the shape of your score tensors and the value of topk_sources.")
+        top_source_idx = srcs.topk(k2).indices.tolist()
+        top_source_scores = srcs[top_source_idx].tolist()
+        sources = [
+            {
+                **source_meta_by_idx[source_idx],
+                "abs_score": score,
+            }
+            for source_idx, score in zip(top_source_idx, top_source_scores)
+        ]
+        hubs.append(
+            _make_mlp_hub(
+                layer_idx=layer_idx, 
+                abs_score=score, 
+                sources=sources, 
+                sample_idx=None, 
+                position=None,
+            )
+        )
+    
+    return hubs
 
 
-def find_top_mlp_hubs_by_sample(scores, n=30):
+def find_top_mlp_hubs_by_sample(scores, topk_hubs=5, topk_sources=5):
     """
     Sample-specific MLP hub ranking over layers.
     Requires per-token MLP score tensors [B, S, Src].
     """
-    if n <= 0:
-        raise ValueError(f"n must be > 0, got {n}.")
+    if topk_hubs <= 0:
+        raise ValueError(f"topk_hubs must be > 0, got {topk_hubs}.")
 
     n_layers = _infer_n_layers_from_scores(scores)
 
@@ -332,35 +361,54 @@ def find_top_mlp_hubs_by_sample(scores, n=30):
         layer_strengths.append(scores[key].abs().sum(dim=(1, 2)))  # [B]
 
     layer_strengths = torch.stack(layer_strengths, dim=1)  # [B, L]
-    k = min(n, layer_strengths.size(1))
-    if k == 0:
-        raise ValueError(f"n is {n}, but layer_strengths has no layers. Check the shape of your score tensors and the value of n.")
+    k1 = min(topk_hubs, layer_strengths.size(1))
+    if k1 == 0:
+        raise ValueError(f"topk_hubs is {topk_hubs}, but layer_strengths has no layers. Check the shape of your score tensors and the value of topk_hubs.")
+
+    source_names = _require_source_names(scores)
+    source_meta_by_idx = [_parse_node_name(name) for name in source_names]
 
     sample_hubs = [[] for _ in range(batch_size)]
     for sample_idx in range(batch_size):
         sample_strength = layer_strengths[sample_idx]  # [L]
-        top_idx = sample_strength.topk(k).indices
-        top_scores = sample_strength[top_idx]
-        sample_hubs[sample_idx] = [
-            _make_mlp_hub(
-                layer_idx=layer_idx,
-                abs_score=score,
-                sample_idx=sample_idx,
-                position=None,
+        top_idx = sample_strength.topk(k1).indices.tolist()
+        top_scores = sample_strength[top_idx].tolist()
+        
+        for layer_idx, score in zip(top_idx, top_scores):
+            key = f"blocks.{layer_idx}.hook_mlp_in"
+            srcs = scores[key][sample_idx].abs().sum(dim=0) # [Src]
+            k2 = min(topk_sources, srcs.numel())
+            if k2 == 0:
+                raise ValueError(f"topk_sources is {topk_sources}, but srcs has no elements. Check the shape of your score tensors and the value of topk_sources.")
+            top_source_idx = srcs.topk(k2).indices.tolist()
+            top_source_scores = srcs[top_source_idx].tolist()
+            sources = [
+                {
+                    **source_meta_by_idx[source_idx],
+                    "abs_score": source_score,
+                }
+                for source_idx, source_score in zip(top_source_idx, top_source_scores)
+            ]
+            sample_hubs[sample_idx].append(
+                _make_mlp_hub(
+                    layer_idx=layer_idx,
+                    abs_score=score,
+                    sources=sources,
+                    sample_idx=sample_idx,
+                    position=None,
+                )
             )
-            for layer_idx, score in zip(top_idx.tolist(), top_scores.tolist())
-        ]
 
     return sample_hubs
 
 
-def find_top_mlp_hubs_by_token_sample(scores, token_level_n=10):
+def find_top_mlp_hubs_by_token_sample(scores, topk_hubs=5, topk_sources=5):
     """
     Sample-specific MLP hub ranking over (token position, layer) pairs.
     Requires per-token MLP score tensors [B, S, Src].
     """
-    if token_level_n <= 0:
-        raise ValueError(f"token_level_n must be > 0, got {token_level_n}.")
+    if topk_hubs <= 0:
+        raise ValueError(f"topk_hubs must be > 0, got {topk_hubs}.")
 
     n_layers = _infer_n_layers_from_scores(scores)
 
@@ -382,32 +430,49 @@ def find_top_mlp_hubs_by_token_sample(scores, token_level_n=10):
         token_layer_strength_by_layer.append(scores[key].abs().sum(dim=-1))  # [B, S]
 
     token_layer_strength = torch.stack(token_layer_strength_by_layer, dim=-1)  # [B, S, L]
+    
+    source_names = _require_source_names(scores)
+    source_meta_by_idx = [_parse_node_name(name) for name in source_names]
 
     token_hubs_by_sample = [[] for _ in range(batch_size)]
     for sample_idx in range(batch_size):
         sample_flat = token_layer_strength[sample_idx].reshape(-1)
-        k = min(token_level_n, sample_flat.numel())
-        if k == 0:
-            raise ValueError(f"token_level_n is {token_level_n}, but sample_hub_strength has no elements. Check the shape of your score tensors and the value of token_level_n.")
+        k1 = min(topk_hubs, sample_flat.numel())
+        if k1 == 0:
+            raise ValueError(f"topk_hubs is {topk_hubs}, but sample_hub_strength has no elements. Check the shape of your score tensors and the value of topk_hubs.")
 
-        top_idx = sample_flat.topk(k).indices
+        top_idx = sample_flat.topk(k1).indices
         top_scores = sample_flat[top_idx]
         for flat_idx, val in zip(top_idx.tolist(), top_scores.tolist()):
             layer_idx = int(flat_idx % n_layers)
             pos_idx = int(flat_idx // n_layers)
+            
+            key = f"blocks.{layer_idx}.hook_mlp_in"
+            srcs = scores[key][sample_idx][pos_idx].abs()
+            k2 = min(topk_sources, srcs.numel())
+            if k2 == 0:
+                raise ValueError(f"topk_sources is {topk_sources}, but srcs has no elements. Check the shape of your score tensors and the value of topk_sources.")
+            top_source_idx = srcs.topk(k2).indices.tolist()
+            top_source_scores = srcs[top_source_idx].tolist()
+            sources = [
+                {
+                    **source_meta_by_idx[source_idx],
+                    "abs_score": source_score,
+                }
+                for source_idx, source_score in zip(top_source_idx, top_source_scores)
+            ]
+            
             token_hubs_by_sample[sample_idx].append(
                 _make_mlp_hub(
                     layer_idx=layer_idx,
                     abs_score=val,
+                    sources=sources,
                     sample_idx=sample_idx,
                     position=pos_idx,
                 )
             )
 
-    return [
-        sorted(hubs, key=lambda x: x["abs_score"], reverse=True)[:token_level_n]
-        for hubs in token_hubs_by_sample
-    ]
+    return token_hubs_by_sample
 
 
 def _require_source_names(scores):
@@ -427,23 +492,26 @@ def _make_edge(source_meta, destination_meta, abs_score, sample_idx=None, positi
     }
 
 
-def _make_hub(destination_meta, abs_score, sample_idx=None, position=None):
+def _make_hub(destination_meta, abs_score, sources=None, sample_idx=None, position=None):
     return {
         "abs_score": abs_score,
-        "source": None,
+        "sources": sources,
         "destination": destination_meta,
         "sample_idx": sample_idx,
         "position": position,
     }
 
 
-def find_top_hubs_aggregated(scores, n=30):
+def find_top_hubs_aggregated(scores, topk_hubs=5, topk_sources=5):
     """
     Global hub ranking regardless of module type.
     Aggregates per-token tensors over batch and position, and always sums over source dimension.
     """
-    if n <= 0:
-        raise ValueError(f"n must be > 0, got {n}.")
+    if topk_hubs <= 0:
+        raise ValueError(f"n must be > 0, got {topk_hubs}.")
+
+    source_names = _require_source_names(scores)
+    source_meta_by_idx = [_parse_node_name(name) for name in source_names]
 
     hub_candidates = []
 
@@ -459,31 +527,60 @@ def find_top_hubs_aggregated(scores, n=30):
                 if matrix.dim() == 2 
                 else matrix.abs().sum(dim=(0, 1, 3))
             )
-            k = min(n, hub_vector.numel())
+            k = min(topk_hubs, hub_vector.numel())
             if k == 0:
-                raise ValueError(f"n is {n}, but hub_vector has no elements. Check the shape of your score tensors and the value of n.")
+                raise ValueError(f"n is {topk_hubs}, but hub_vector has no elements. Check the shape of your score tensors and the value of n.")
 
             top_idx = hub_vector.topk(k).indices
             top_scores = hub_vector[top_idx]
 
             for head_idx, score in zip(top_idx.tolist(), top_scores.tolist()):
+                if matrix.dim() == 4:
+                    srcs = matrix[:, :, head_idx, :].abs().sum(dim=(0, 1))
+                else:
+                    srcs = matrix[head_idx, :].abs()
+                k2 = min(topk_sources, srcs.numel())
+                if k2 == 0:
+                    raise ValueError(f"topk_sources is {topk_sources}, but srcs has no elements.")
+                top_source_idx = srcs.topk(k2).indices.tolist()
+                top_source_scores = srcs[top_source_idx].tolist()
+                sources = [
+                    {
+                        **source_meta_by_idx[source_idx],
+                        "abs_score": source_score,
+                    }
+                    for source_idx, source_score in zip(top_source_idx, top_source_scores)
+                ]
                 hub_candidates.append(
-                    _make_hub(destination_meta={**dest_meta, "head": head_idx}, abs_score=score)
+                    _make_hub(destination_meta={**dest_meta, "head": head_idx}, abs_score=score, sources=sources)
                 )
         elif matrix.dim() in (1, 3):  # [Src] or [B, Pos, Src]
             hub_score = matrix.abs().sum().item()
-            hub_candidates.append(_make_hub(destination_meta=dest_meta, abs_score=hub_score))
+            srcs = matrix.abs().sum(dim=(0, 1)) if matrix.dim() == 3 else matrix.abs()
+            k2 = min(topk_sources, srcs.numel())
+            if k2 == 0:
+                raise ValueError(f"topk_sources is {topk_sources}, but srcs has no elements.")
+            top_source_idx = srcs.topk(k2).indices.tolist()
+            top_source_scores = srcs[top_source_idx].tolist()
+            sources = [
+                {
+                    **source_meta_by_idx[source_idx],
+                    "abs_score": source_score,
+                }
+                for source_idx, source_score in zip(top_source_idx, top_source_scores)
+            ]
+            hub_candidates.append(_make_hub(destination_meta=dest_meta, abs_score=hub_score, sources=sources))
 
-    return sorted(hub_candidates, key=lambda x: x["abs_score"], reverse=True)[:n]
+    return sorted(hub_candidates, key=lambda x: x["abs_score"], reverse=True)[:topk_hubs]
 
 
-def find_top_hubs_by_sample(scores, n=30):
+def find_top_hubs_by_sample(scores, topk_hubs=5, topk_sources=5):
     """
     Sample-specific hub ranking regardless of module type.
     Requires per-token score tensors.
     """
-    if n <= 0:
-        raise ValueError(f"n must be > 0, got {n}.")
+    if topk_hubs <= 0:
+        raise ValueError(f"n must be > 0, got {topk_hubs}.")
     
     n_layers = _infer_n_layers_from_scores(scores)
 
@@ -497,6 +594,9 @@ def find_top_hubs_by_sample(scores, n=30):
     if batch_size is None:
         raise ValueError("Per-sample hub analysis requires per-token scores [B, S, Src].")
 
+    source_names = _require_source_names(scores)
+    source_meta_by_idx = [_parse_node_name(name) for name in source_names]
+
     hub_candidates_by_sample = [[] for _ in range(batch_size)]
 
     for dest_name, matrix in scores.items():
@@ -509,18 +609,32 @@ def find_top_hubs_by_sample(scores, n=30):
             bsz, _, _, _ = matrix.shape
             for sample_idx in range(bsz):
                 sample_hub_vector = matrix[sample_idx].abs().sum(dim=(0, 2))  # [Head]
-                k = min(n, sample_hub_vector.numel())
-                if k == 0:
-                    raise ValueError(f"n is {n}, but sample_hub_vector has no elements. Check the shape of your score tensors and the value of n.")
+                k1 = min(topk_hubs, sample_hub_vector.numel())
+                if k1 == 0:
+                    raise ValueError(f"n is {topk_hubs}, but sample_hub_vector has no elements. Check the shape of your score tensors and the value of n.")
 
-                top_idx = sample_hub_vector.topk(k).indices
+                top_idx = sample_hub_vector.topk(k1).indices
                 top_scores = sample_hub_vector[top_idx]
 
                 for head_idx, score in zip(top_idx.tolist(), top_scores.tolist()):
+                    srcs = matrix[sample_idx, :, head_idx, :].abs().sum(dim=0)
+                    k2 = min(topk_sources, srcs.numel())
+                    if k2 == 0:
+                        raise ValueError(f"topk_sources is {topk_sources}, but srcs has no elements.")
+                    top_source_idx = srcs.topk(k2).indices.tolist()
+                    top_source_scores = srcs[top_source_idx].tolist()
+                    sources = [
+                        {
+                            **source_meta_by_idx[source_idx],
+                            "abs_score": source_score,
+                        }
+                        for source_idx, source_score in zip(top_source_idx, top_source_scores)
+                    ]
                     hub_candidates_by_sample[sample_idx].append(
                         _make_hub(
                             destination_meta={**dest_meta, "head": head_idx},
                             abs_score=score,
+                            sources=sources,
                             sample_idx=sample_idx,
                             position=None,
                         )
@@ -529,28 +643,42 @@ def find_top_hubs_by_sample(scores, n=30):
             bsz, _, _ = matrix.shape
             for sample_idx in range(bsz):
                 hub_score = matrix[sample_idx].abs().sum().item()
+                srcs = matrix[sample_idx].abs().sum(dim=0)
+                k2 = min(topk_sources, srcs.numel())
+                if k2 == 0:
+                    raise ValueError(f"topk_sources is {topk_sources}, but srcs has no elements.")
+                top_source_idx = srcs.topk(k2).indices.tolist()
+                top_source_scores = srcs[top_source_idx].tolist()
+                sources = [
+                    {
+                        **source_meta_by_idx[source_idx],
+                        "abs_score": source_score,
+                    }
+                    for source_idx, source_score in zip(top_source_idx, top_source_scores)
+                ]
                 hub_candidates_by_sample[sample_idx].append(
                     _make_hub(
                         destination_meta=dest_meta,
                         abs_score=hub_score,
+                        sources=sources,
                         sample_idx=sample_idx,
                         position=None,
                     )
                 )
 
     return [
-        sorted(hubs, key=lambda x: x["abs_score"], reverse=True)[:n]
+        sorted(hubs, key=lambda x: x["abs_score"], reverse=True)[:topk_hubs]
         for hubs in hub_candidates_by_sample
     ]
 
 
-def find_top_hubs_by_token_sample(scores, token_level_n=10):
+def find_top_hubs_by_token_sample(scores, topk_hubs=5, topk_sources=5):
     """
     Sample-specific token-level hub ranking regardless of module type.
     Requires per-token score tensors.
     """
-    if token_level_n <= 0:
-        raise ValueError(f"token_level_n must be > 0, got {token_level_n}.")
+    if topk_hubs <= 0:
+        raise ValueError(f"token_level_n must be > 0, got {topk_hubs}.")
 
     n_layers = _infer_n_layers_from_scores(scores)
 
@@ -563,6 +691,9 @@ def find_top_hubs_by_token_sample(scores, token_level_n=10):
 
     if batch_size is None:
         raise ValueError("Token-level hub analysis requires per-token scores [B, S, Src].")
+
+    source_names = _require_source_names(scores)
+    source_meta_by_idx = [_parse_node_name(name) for name in source_names]
 
     hub_candidates_by_sample = [[] for _ in range(batch_size)]
 
@@ -577,18 +708,32 @@ def find_top_hubs_by_token_sample(scores, token_level_n=10):
             token_strength = matrix.abs().sum(dim=-1)  # [B, Pos, Head]
             for sample_idx in range(bsz):
                 sample_flat = token_strength[sample_idx].reshape(-1)
-                k = min(token_level_n, sample_flat.numel())
-                if k == 0:
-                    raise ValueError(f"token_level_n is {token_level_n}, but sample_flat has no elements. Check the shape of your score tensors and the value of token_level_n.")
-                top_idx = sample_flat.topk(k).indices
+                k1 = min(topk_hubs, sample_flat.numel())
+                if k1 == 0:
+                    raise ValueError(f"token_level_n is {topk_hubs}, but sample_flat has no elements. Check the shape of your score tensors and the value of token_level_n.")
+                top_idx = sample_flat.topk(k1).indices
                 top_scores = sample_flat[top_idx]
                 for flat_idx, score in zip(top_idx.tolist(), top_scores.tolist()):
                     pos_idx = int(flat_idx // n_heads)
                     head_idx = int(flat_idx % n_heads)
+                    srcs = matrix[sample_idx, pos_idx, head_idx, :].abs()
+                    k2 = min(topk_sources, srcs.numel())
+                    if k2 == 0:
+                        raise ValueError(f"topk_sources is {topk_sources}, but srcs has no elements.")
+                    top_source_idx = srcs.topk(k2).indices.tolist()
+                    top_source_scores = srcs[top_source_idx].tolist()
+                    sources = [
+                        {
+                            **source_meta_by_idx[source_idx],
+                            "abs_score": source_score,
+                        }
+                        for source_idx, source_score in zip(top_source_idx, top_source_scores)
+                    ]
                     hub_candidates_by_sample[sample_idx].append(
                         _make_hub(
                             destination_meta={**dest_meta, "head": head_idx},
                             abs_score=score,
+                            sources=sources,
                             sample_idx=sample_idx,
                             position=pos_idx,
                         )
@@ -598,23 +743,37 @@ def find_top_hubs_by_token_sample(scores, token_level_n=10):
             token_strength = matrix.abs().sum(dim=-1)  # [B, Pos]
             for sample_idx in range(bsz):
                 sample_flat = token_strength[sample_idx]
-                k = min(token_level_n, sample_flat.numel())
-                if k == 0:
-                    raise ValueError(f"token_level_n is {token_level_n}, but sample_flat has no elements. Check the shape of your score tensors and the value of token_level_n.")
-                top_idx = sample_flat.topk(k).indices
+                k1 = min(topk_hubs, sample_flat.numel())
+                if k1 == 0:
+                    raise ValueError(f"token_level_n is {topk_hubs}, but sample_flat has no elements. Check the shape of your score tensors and the value of token_level_n.")
+                top_idx = sample_flat.topk(k1).indices
                 top_scores = sample_flat[top_idx]
                 for pos_idx, score in zip(top_idx.tolist(), top_scores.tolist()):
+                    srcs = matrix[sample_idx, pos_idx, :].abs()
+                    k2 = min(topk_sources, srcs.numel())
+                    if k2 == 0:
+                        raise ValueError(f"topk_sources is {topk_sources}, but srcs has no elements.")
+                    top_source_idx = srcs.topk(k2).indices.tolist()
+                    top_source_scores = srcs[top_source_idx].tolist()
+                    sources = [
+                        {
+                            **source_meta_by_idx[source_idx],
+                            "abs_score": source_score,
+                        }
+                        for source_idx, source_score in zip(top_source_idx, top_source_scores)
+                    ]
                     hub_candidates_by_sample[sample_idx].append(
                         _make_hub(
                             destination_meta=dest_meta,
                             abs_score=score,
+                            sources=sources,
                             sample_idx=sample_idx,
                             position=pos_idx,
                         )
                     )
 
     return [
-        sorted(hubs, key=lambda x: x["abs_score"], reverse=True)[:token_level_n]
+        sorted(hubs, key=lambda x: x["abs_score"], reverse=True)[:topk_hubs]
         for hubs in hub_candidates_by_sample
     ]
 
@@ -1833,7 +1992,7 @@ if __name__ == "__main__":
         profiler.reset_header()
     
     aggregated_start = profiler.begin(enabled=profile, reset_peak=True)
-    top_mlp_hubs_aggregated = find_top_mlp_hubs_aggregated(results, n=5)
+    top_mlp_hubs_aggregated = find_top_mlp_hubs_aggregated(results, topk_hubs=5, topk_sources=5)
     profiler.end(enabled=profile, start_time=aggregated_start, stage_name="find_top_mlp_hubs_aggregated", report_peak=True)
     logger.info(f"Top MLP hubs by aggregation:\n{json.dumps(top_mlp_hubs_aggregated, indent=4)}")
 
@@ -1842,7 +2001,7 @@ if __name__ == "__main__":
 if __name__ == "__main__":
     if return_per_token_scores:
         sample_start = profiler.begin(enabled=profile, reset_peak=True)
-        top_mlp_hubs_by_sample = find_top_mlp_hubs_by_sample(results, n=5)
+        top_mlp_hubs_by_sample = find_top_mlp_hubs_by_sample(results, topk_hubs=5, topk_sources=5)
         profiler.end(enabled=profile, start_time=sample_start, stage_name="find_top_mlp_hubs_by_sample", report_peak=True)
         logger.info(f"Top MLP hubs by sample:\n{json.dumps(top_mlp_hubs_by_sample, indent=4)}")
         
@@ -1851,7 +2010,7 @@ if __name__ == "__main__":
 if __name__ == "__main__":
     if return_per_token_scores:
         token_sample_start = profiler.begin(enabled=profile, reset_peak=True)
-        top_mlp_hubs_by_token_sample = find_top_mlp_hubs_by_token_sample(results, token_level_n=5)
+        top_mlp_hubs_by_token_sample = find_top_mlp_hubs_by_token_sample(results, topk_hubs=5, topk_sources=5)
         profiler.end(enabled=profile, start_time=token_sample_start, stage_name="find_top_mlp_hubs_by_token_sample", report_peak=True)
         logger.info(f"Top MLP hubs by token and sample:\n{json.dumps(top_mlp_hubs_by_token_sample, indent=4)}")
  
@@ -1872,7 +2031,7 @@ if __name__ == "__main__":
         profiler.reset_header()
     
     aggregated_start = profiler.begin(enabled=profile, reset_peak=True)
-    top_hubs_aggregated = find_top_hubs_aggregated(results, n=5)
+    top_hubs_aggregated = find_top_hubs_aggregated(results, topk_hubs=5)
     profiler.end(enabled=profile, start_time=aggregated_start, stage_name="find_top_hubs_aggregated", report_peak=True)
     logger.info(f"Top hubs by aggregation:\n{json.dumps(top_hubs_aggregated, indent=4)}")
     
@@ -1881,7 +2040,7 @@ if __name__ == "__main__":
 if __name__ == "__main__":
     if return_per_token_scores:
         sample_start = profiler.begin(enabled=profile, reset_peak=True)
-        top_hubs_by_sample = find_top_hubs_by_sample(results, n=5)
+        top_hubs_by_sample = find_top_hubs_by_sample(results, topk_hubs=5)
         profiler.end(enabled=profile, start_time=sample_start, stage_name="find_top_hubs_by_sample", report_peak=True)
         logger.info(f"Top hubs by sample:\n{json.dumps(top_hubs_by_sample, indent=4)}")
 
@@ -1890,7 +2049,7 @@ if __name__ == "__main__":
 if __name__ == "__main__":
     if return_per_token_scores:
         token_sample_start = profiler.begin(enabled=profile, reset_peak=True)
-        top_token_hubs_by_sample = find_top_hubs_by_token_sample(results, token_level_n=5)
+        top_token_hubs_by_sample = find_top_hubs_by_token_sample(results, topk_hubs=5)
         profiler.end(enabled=profile, start_time=token_sample_start, stage_name="find_top_hubs_by_token_sample", report_peak=True)
         logger.info(f"Top hubs by token and sample:\n{json.dumps(top_token_hubs_by_sample, indent=4)}")
 
@@ -1922,6 +2081,5 @@ if __name__ == "__main__":
         top_edges_by_token_sample = find_top_edges_by_token_sample(results, token_level_n=3)
         profiler.end(enabled=profile, start_time=token_sample_start, stage_name="find_top_edges_by_token_sample", report_peak=True)
         logger.info(f"Top edges by token and sample:\n{json.dumps(top_edges_by_token_sample, indent=4)}")
-
 
 # %%

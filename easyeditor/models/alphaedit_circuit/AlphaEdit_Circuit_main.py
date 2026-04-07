@@ -196,7 +196,7 @@ def execute_AlphaEdit_Circuit(
             return_per_head_attribution=False,
             return_per_token_scores=True,
         )
-        top_mlp_hubs_by_token_sample = find_top_mlp_hubs_by_token_sample(scores, token_level_n=9)
+        top_mlp_hubs_by_token_sample = find_top_mlp_hubs_by_token_sample(scores, topk_hubs=9)
         
         hubs_skipped = []
         hubs = []
@@ -249,7 +249,7 @@ def execute_AlphaEdit_Circuit(
                 hubs[-1]["destination"]["layer"],
                 context_templates,
             )
-
+            
             z_list.append(cur_z)
             zs = torch.stack(z_list, dim=1) # shape [d_model, num_requests]
             
@@ -310,7 +310,6 @@ def execute_AlphaEdit_Circuit(
             repeat_factor = (layer_ks.size(1) // targets.size(1))
             targets = targets.repeat_interleave(repeat_factor, dim=1)
             resid = targets / (len(hubs) - hub_idx)  # Distribute residual across layers
-            # resid = targets
             layer_device = weights[f"{hparams.rewrite_module_tmp.format(layer)}.weight"].device
             proj = P[layer].to(device=layer_device, dtype=torch.float)
             layer_ks = layer_ks.to(device=layer_device, dtype=torch.float)

@@ -78,7 +78,7 @@ def compute_ks(
         ) as tr:
             model(**input_tok)
             
-    layer_ks = tr.input[list(range(tr.input.shape[0])), idxs]
+    layer_ks = tr.input[list(range(tr.input.shape[0])), idxs] # shape: [num_prompts, hidden_size]
 
     # return the hidden representation per request by averaging across all prompts for that request
     context_type_lens = [0] + [len(context_type) for context_type in context_templates]
@@ -90,7 +90,7 @@ def compute_ks(
         tmp = []
         for j in range(len(context_type_csum) - 1):
             start, end = context_type_csum[j], context_type_csum[j + 1]
-            tmp.append(layer_ks[i + start : i + end].mean(0))
+            tmp.append(layer_ks[i + start : i + end].mean(dim=0)) # shape: [hidden_size]
         ans.append(torch.stack(tmp, 0).mean(0))
     
     return torch.stack(ans, dim=0)
