@@ -75,7 +75,7 @@ def compute_z(
         prompts = [prompt.strip() for prompt in prompts]
         all_prompts.extend(prompts)
 
-    tok.padding_side = "left"
+    tok.padding_side = "right"
     input_tok = tok(
         all_prompts,
         return_tensors="pt",

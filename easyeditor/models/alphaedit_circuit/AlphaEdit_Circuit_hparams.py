@@ -8,6 +8,7 @@ import yaml
 @dataclass
 class AlphaEditCircuitHyperParams(HyperParams):
     # Method
+    num_hidden_layers: int
     layers: List[int]
     layer_selection: Literal["all", "random"]
     fact_token: Literal[

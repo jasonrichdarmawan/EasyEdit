@@ -1367,12 +1367,12 @@ class EAPGraph:
         else:
             subject_tokens = []
             for i, (start, end) in enumerate(subject_spans):
-                subject_tokens.append(clean_wte[i, start:end]) # shape [Subject_Tokens, D_model]
+                subject_tokens.append(clean_wte[i, start:end + 1]) # shape [Subject_Tokens, D_model]
             subject_tokens = torch.cat(subject_tokens, dim=0) # [Total_Subject_Tokens, D_model]
             std = subject_tokens.std().item()
             corrupted_wte = clean_wte.detach().clone()
             for i, (start, end) in enumerate(subject_spans):
-                corrupted_wte[i, start:end] += std
+                corrupted_wte[i, start:end + 1] += std
 
             def noisy_embed_hook(module, input, output):
                 return corrupted_wte
@@ -1710,7 +1710,7 @@ class EAPGraph:
 if __name__ == "__main__":
     import os
     
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     # Solve out-of-memory issues by allowing PyTorch to split large allocations into smaller segments that can be freed independently.
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     

@@ -1,5 +1,6 @@
 alg_name: "AlphaEdit_Circuit"
 model_name: "Qwen/Qwen3-4B-Instruct-2507"
+num_hidden_layers: 36
 edit_with_chat_template: False
 stats_dir: "./data/stats"
 device: 0
@@ -9,7 +10,7 @@ layers: [4, 5, 6, 7, 8]
 clamp_norm_factor: 4
 layer_selection: "all"
 fact_token: "subject_last"
-v_num_grad_steps: 100
+v_num_grad_steps: 25
 v_lr: 1e-1
 v_loss_layer: 35
 v_weight_decay: 0.5
