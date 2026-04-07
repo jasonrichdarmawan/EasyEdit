@@ -196,7 +196,7 @@ def execute_AlphaEdit_Circuit(
             return_per_head_attribution=False,
             return_per_token_scores=True,
         )
-        top_mlp_hubs_by_token_sample = find_top_mlp_hubs_by_token_sample(scores, topk_hubs=9)
+        top_mlp_hubs_by_token_sample = find_top_mlp_hubs_by_token_sample(scores, topk_hubs=3)
         
         hubs_skipped = []
         hubs = []
@@ -225,19 +225,6 @@ def execute_AlphaEdit_Circuit(
             print(f"Top MLP hubs by token/sample-level scores:\n{json.dumps(top_mlp_hubs_by_token_sample, indent=4)}")
             continue
 
-        # z_list = []
-        # cur_z = compute_z(
-        #     model,
-        #     tok,
-        #     request,
-        #     hparams,
-        #     hubs[-1]["destination"]["layer"],
-        #     context_templates,
-        # )
-
-        # z_list.append(cur_z)
-        # zs = torch.stack(z_list, dim=1) # shape [d_model, num_requests]
-
         # Insert
         for hub_idx, hub in enumerate(hubs):
             z_list = []
@@ -246,7 +233,7 @@ def execute_AlphaEdit_Circuit(
                 tok,
                 request,
                 hparams,
-                hubs[-1]["destination"]["layer"],
+                hub["destination"]["layer"],
                 context_templates,
             )
             
@@ -254,6 +241,9 @@ def execute_AlphaEdit_Circuit(
             zs = torch.stack(z_list, dim=1) # shape [d_model, num_requests]
             
             print(f"Hub:\n{json.dumps(hub, indent=4)}\n")
+            
+            for source_idx, source in enumerate(hub["sources"]):
+                pass
             
             layer = hub["destination"]["layer"]
             
