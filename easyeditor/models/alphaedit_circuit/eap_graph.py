@@ -299,16 +299,16 @@ def _topk_over_mlp_sources(srcs: torch.Tensor, mlp_out_idx: torch.Tensor, topk_s
 
     valid_mlp_out_idx = mlp_out_idx[mlp_out_idx < srcs.numel()]
     if valid_mlp_out_idx.numel() == 0:
-        raise ValueError(
-            "No eligible MLP-out source indices for this destination. "
-            f"srcs has {srcs.numel()} entries, but all MLP-out indices are out of range."
+        # This can happen for early destinations (e.g. blocks.0.hook_mlp_in),
+        # where no previous-layer MLP outputs exist in the current source set.
+        return (
+            torch.empty(0, dtype=torch.long, device=srcs.device),
+            torch.empty(0, dtype=srcs.dtype, device=srcs.device),
         )
 
     k2 = min(topk_sources, valid_mlp_out_idx.numel())
     if k2 == 0:
-        raise ValueError(
-            f"topk_sources is {topk_sources}, but no eligible MLP-out sources were found."
-        )
+        raise ValueError(f"topk_sources is {topk_sources}")
 
     mask = torch.ones(srcs.numel(), dtype=torch.bool, device=srcs.device)
     mask.index_fill_(0, valid_mlp_out_idx, False)
@@ -337,7 +337,7 @@ def find_top_mlp_hubs_aggregated(scores, topk_hubs=5, topk_sources=5):
     layer_strengths = torch.stack(layer_strengths)  # [L]
     k1 = min(topk_hubs, layer_strengths.numel())
     if k1 == 0:
-        raise ValueError(f"topk_hubs is {topk_hubs}, but layer_strengths has no elements. Check the shape of your score tensors and the value of topk_hubs.")
+        raise ValueError(f"topk_hubs is {topk_hubs}")
 
     top_idx = layer_strengths.topk(k1).indices.tolist()
     top_scores = layer_strengths[top_idx].tolist()
@@ -1894,7 +1894,7 @@ class EAPGraph:
 if __name__ == "__main__":
     import os
     
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    os.environ["CUDA_VISIBLE_DEVICES"] = "1"
     # Solve out-of-memory issues by allowing PyTorch to split large allocations into smaller segments that can be freed independently.
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     

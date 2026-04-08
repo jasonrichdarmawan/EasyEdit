@@ -3,22 +3,19 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import numpy as np
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ..rome.layer_stats import layer_stats
 from ...util import nethook
-from ...util.generate import generate_fast
 from ...util.globals import *
 
 from .compute_ks import compute_ks
 from .compute_z import compute_z
 from .AlphaEdit_Circuit_hparams import AlphaEditCircuitHyperParams
+from .position_utils import get_lookup_positions_in_target
 from .eap_graph import (
     EAPGraph, get_kl_div_metric, 
-    find_top_mlp_hubs_aggregated,
-    find_top_mlp_hubs_by_sample,
     find_top_mlp_hubs_by_token_sample,
 )
 import json
@@ -152,11 +149,9 @@ def execute_AlphaEdit_Circuit(
 
     for request in requests:
         eap = EAPGraph(model)
-        all_prompts = []
-        prompt_request_idx = []
+        eap_prompts = []
         if not hparams.edit_with_chat_template:
-            all_prompts.append(request["prompt"])
-            prompt_request_idx.append(i)
+            eap_prompts.append(request["prompt"])
         else:
             chat = [
                 {"role": "system", "content": "Only respond with the answer. Do not include any explanations."},
@@ -165,68 +160,100 @@ def execute_AlphaEdit_Circuit(
                 {"role": "user", "content": request["prompt"]},
             ]
             prompt = tok.apply_chat_template(chat, add_generation_prompt=False, tokenize=False)
-            all_prompts.append(prompt)
-            prompt_request_idx.append(i)
+            eap_prompts.append(prompt)
         
         tok.padding_side = "right"
-        input_tok = tok(
-            all_prompts,
+        eap_tok = tok(
+            eap_prompts,
             return_tensors="pt",
             padding=True,
             add_special_tokens=not hparams.edit_with_chat_template,
         ).to(model.device)
-        print(f"Input IDs: {input_tok['input_ids']}")
+        print(f"EAP Input IDs: {eap_tok['input_ids']}")
         
         subject_spans = []
-        for i in range(len(all_prompts)):
-            start_char = all_prompts[i].find(request["subject"])
+        for i in range(len(eap_prompts)):
+            start_char = eap_prompts[i].find(request["subject"])
             end_char = start_char + len(request["subject"]) - 1
-            start_tok = input_tok.char_to_token(i, start_char)
-            end_tok = input_tok.char_to_token(i, end_char)
+            start_tok = eap_tok.char_to_token(i, start_char)
+            end_tok = eap_tok.char_to_token(i, end_char)
             subject_spans.append((start_tok, end_tok))
         print(f"Subject spans: {subject_spans}")
         
         metric_fn = get_kl_div_metric()
         scores = eap.attribute(
-            input_ids=input_tok["input_ids"], 
-            attention_mask=input_tok["attention_mask"],
+            input_ids=eap_tok["input_ids"], 
+            attention_mask=eap_tok["attention_mask"],
             metric_fn=metric_fn,
             subject_spans=subject_spans,
             integrated_gradients=5,
             return_per_head_attribution=False,
             return_per_token_scores=True,
         )
-        top_mlp_hubs_by_token_sample = find_top_mlp_hubs_by_token_sample(scores, topk_hubs=3)
+        top_mlp_hubs_by_token_sample = find_top_mlp_hubs_by_token_sample(scores, topk_hubs=3, topk_sources=3)
         
         hubs_skipped = []
         hubs = []
-        for hub in top_mlp_hubs_by_token_sample[0]:
+        for hub in deepcopy(top_mlp_hubs_by_token_sample[0]):
             if not hub["destination"]["raw"].endswith("hook_mlp_in"):
+                hubs_skipped.append(hub)
                 continue
             
             shallow_layers = list(range(0, int(hparams.num_hidden_layers * 1/8)))
-            deep_layers = list(range(int(hparams.num_hidden_layers * 7/8), hparams.num_hidden_layers))
-            layers_not_to_edit = shallow_layers + deep_layers
+            # deep_layers = list(range(int(hparams.num_hidden_layers * 7/8), hparams.num_hidden_layers))
+            layers_not_to_edit = (
+                shallow_layers
+                # + deep_layers
+            )
             if hub["destination"]["layer"] in layers_not_to_edit:
                 hubs_skipped.append(hub)
                 continue
             
             hubs.append(hub)
+        hubs = sorted(hubs, key=lambda x: x["destination"]["layer"])
+        
+        sources_skipped = [[] for _ in range(len(hubs))]
+        for hub_idx, hub in enumerate(hubs):
+            sources = []
+            for source in hub["sources"]:
+                if not source["raw"].endswith("hook_mlp_out"):
+                    sources_skipped[hub_idx].append(source)
+                    continue
+                
+                shallow_layers = list(range(0, int(hparams.num_hidden_layers * 1/8)))
+                deep_layers = list(range(int(hparams.num_hidden_layers * 7/8), hparams.num_hidden_layers))
+                layers_not_to_edit = shallow_layers + deep_layers
+                if source["layer"] in layers_not_to_edit:
+                    sources_skipped[hub_idx].append(source)
+                    continue
+                
+                sources.append(source)
+            sources = sorted(sources, key=lambda x: x["layer"])
+            
+            if len(sources) == 0:
+                hubs.remove(hub)
+                hubs_skipped.append(hub)
+                continue
+            
+            hub["sources"] = sources
         
         print(f"Hubs:\n{json.dumps(hubs, indent=4)}")
-        
         if len(hubs_skipped) > 0:
             print(f"Skipped hubs:\n{json.dumps(hubs_skipped, indent=4)}")
-        
-        hubs = sorted(hubs, key=lambda x: x["destination"]["layer"])
-
         if len(hubs) == 0:
             print("No significant hubs found for this request. Skipping...")
             print(f"Top MLP hubs by token/sample-level scores:\n{json.dumps(top_mlp_hubs_by_token_sample, indent=4)}")
             continue
 
+        total_source_updates = sum(len(hub_item["sources"]) for hub_item in hubs)
+        updates_done = 0
+            
         # Insert
         for hub_idx, hub in enumerate(hubs):
+            print(f"Hub:\n{json.dumps(hub, indent=4)}")
+            if len(sources_skipped[hub_idx]) > 0:
+                print(f"Skipped sources for this hub:\n{json.dumps(sources_skipped[hub_idx], indent=4)}")
+
             z_list = []
             cur_z = compute_z(
                 model,
@@ -235,109 +262,127 @@ def execute_AlphaEdit_Circuit(
                 hparams,
                 hub["destination"]["layer"],
                 context_templates,
+                source_enc=eap_tok,
+                source_lookup_idx=hub["position"],
+                rendered_source_prompt=eap_prompts[0],
+                raw_source_prompt=request["prompt"],
             )
             
             z_list.append(cur_z)
             zs = torch.stack(z_list, dim=1) # shape [d_model, num_requests]
             
-            print(f"Hub:\n{json.dumps(hub, indent=4)}\n")
-            
-            for source_idx, source in enumerate(hub["sources"]):
-                pass
-            
-            layer = hub["destination"]["layer"]
-            
-            # Get current model activations
-            layer_ks = compute_ks(model, tok, [request], hparams, layer, context_templates).T # shape [mlp_hidden_size, num_requests]
-            print(f"Writing {layer_ks.size(1)} key/value pair(s) into layer {layer}")
+            for source in hub["sources"]:
+                # Get current model activations
+                layer_ks = compute_ks(
+                    model,
+                    tok,
+                    [request],
+                    hparams,
+                    source["layer"],
+                    context_templates,
+                    source_enc=eap_tok,
+                    source_lookup_idx=hub["position"],
+                    rendered_source_prompt=eap_prompts[0],
+                    raw_source_prompt=request["prompt"],
+                ).T # shape [mlp_hidden_size, num_requests]
+                print(f"Writing {layer_ks.size(1)} key/value pair(s) into layer {source['layer']}")
 
-            # Compute residual error
-            all_prompts = []
-            if not hparams.edit_with_chat_template:
-                all_prompts.append(request["prompt"])
-            else:
-                chat = [
-                    {"role": "system", "content": "Only respond with the answer. Do not include any explanations."},
-                    # {"role": "user", "content": "Suppose Jack wears a red shirt, Jill wears a green shirt, and Terry Fox wears a blue shirt. Therefore, the person wearing the blue shirt is a citizen of"},
-                    # {"role": "assistant", "content": "Canada"},
-                    {"role": "user", "content": request["prompt"]},
-                ]
-                prompt = tok.apply_chat_template(chat, add_generation_prompt=True, tokenize=False)
-                all_prompts.append(prompt)
-            
-            input_tok = tok(
-                all_prompts,
-                return_tensors="pt",
-                padding=True,
-                add_special_tokens=not hparams.edit_with_chat_template,
-            ).to(model.device)
-            
-            idxs = []
-            if hparams.fact_token == "subject_first":
-                start_char = all_prompts[0].find(request["subject"])
-                start_tok = input_tok.char_to_token(0, start_char)
-                idxs.append(start_tok)
-            elif hparams.fact_token == "subject_last":
-                start_char = all_prompts[0].find(request["subject"])
-                start_tok = input_tok.char_to_token(0, start_char)
-                end_char = start_char + len(request["subject"]) - 1
-                end_tok = input_tok.char_to_token(0, end_char)
-                idxs.append(end_tok)
-            
-            with torch.no_grad():
-                with nethook.Trace(
-                    module=model,
-                    layer=hparams.layer_module_tmp.format(layer),
-                    retain_output=True,
-                    stop=True,
-                ) as tr:
-                    model(**input_tok)
-            
-            cur_zs = tr.output[list(range(tr.output.shape[0])), idxs].T # shape [d_model, num_requests]
-            targets = zs - cur_zs
-            print("z error", torch.linalg.norm(targets, dim=0).mean())
-
-            repeat_factor = (layer_ks.size(1) // targets.size(1))
-            targets = targets.repeat_interleave(repeat_factor, dim=1)
-            resid = targets / (len(hubs) - hub_idx)  # Distribute residual across layers
-            layer_device = weights[f"{hparams.rewrite_module_tmp.format(layer)}.weight"].device
-            proj = P[layer].to(device=layer_device, dtype=torch.float)
-            layer_ks = layer_ks.to(device=layer_device, dtype=torch.float)
-            resid = resid.to(device=layer_device, dtype=torch.float)
-            c = cache_c[layer].to(device=layer_device, dtype=torch.float)
-            lhs = (
-                proj @ (c + layer_ks @ layer_ks.T)
-                + hparams.L2 * torch.eye(layer_ks.shape[0], dtype=torch.float, device=layer_device)
-            )
-            rhs = (
-                proj @ layer_ks @ resid.T
-            )
-            upd_matrix = torch.linalg.solve(lhs, rhs)
-
-            # Adjust update matrix shape
-            weight_name = f"{hparams.rewrite_module_tmp.format(layer)}.weight"
-            upd_matrix = upd_matrix_match_shape(upd_matrix, weights[weight_name].shape)
-
-            print("orig norm", torch.linalg.norm(weights[weight_name]))
-            print("upd norm", torch.linalg.norm(upd_matrix))
-
-            # Update model weights and record desired changes in `delta` variable
-            with torch.no_grad():
-                weights[weight_name][...] = weights[weight_name] + upd_matrix.float()
-                if deltas.get(weight_name) is None:
-                    deltas[weight_name] = upd_matrix.detach().cpu()
+                # Compute residual error
+                all_prompts = []
+                if not hparams.edit_with_chat_template:
+                    all_prompts.append(request["prompt"])
                 else:
-                    deltas[weight_name] += upd_matrix.detach().cpu()
-            
-            layer_ks = compute_ks(model, tok, [request], hparams, layer, context_templates).T.to(device=cache_c[layer].device, dtype=torch.float)
-            cache_c[layer] += layer_ks @ layer_ks.T
-            
-            # Clear GPU memory
-            #del U,S,cov
-            for x in [layer_ks, cur_zs, targets]:
-                x.cpu()
-                del x
-            torch.cuda.empty_cache()
+                    chat = [
+                        {"role": "system", "content": "Only respond with the answer. Do not include any explanations."},
+                        # {"role": "user", "content": "Suppose Jack wears a red shirt, Jill wears a green shirt, and Terry Fox wears a blue shirt. Therefore, the person wearing the blue shirt is a citizen of"},
+                        # {"role": "assistant", "content": "Canada"},
+                        {"role": "user", "content": request["prompt"]},
+                    ]
+                    prompt = tok.apply_chat_template(chat, add_generation_prompt=True, tokenize=False)
+                    all_prompts.append(prompt)
+                
+                cur_zs_tok = tok(
+                    all_prompts,
+                    return_tensors="pt",
+                    padding=True,
+                    add_special_tokens=not hparams.edit_with_chat_template,
+                ).to(model.device)
+                
+                idxs = get_lookup_positions_in_target(
+                    source_enc=eap_tok,
+                    source_lookup_idx=hub["position"],
+                    rendered_source_prompt=eap_prompts[0],
+                    raw_source_prompt=request["prompt"],
+                    target_enc=cur_zs_tok,
+                    rendered_target_prompts=all_prompts,
+                )
+                # idxs = []
+                # if hparams.fact_token == "subject_first":
+                #     start_char = all_prompts[0].find(request["subject"])
+                #     start_tok = cur_zs_tok.char_to_token(0, start_char)
+                #     idxs.append(start_tok)
+                # elif hparams.fact_token == "subject_last":
+                #     start_char = all_prompts[0].find(request["subject"])
+                #     start_tok = cur_zs_tok.char_to_token(0, start_char)
+                #     end_char = start_char + len(request["subject"]) - 1
+                #     end_tok = cur_zs_tok.char_to_token(0, end_char)
+                #     idxs.append(end_tok)
+                
+                with torch.no_grad():
+                    with nethook.Trace(
+                        module=model,
+                        layer=hparams.layer_module_tmp.format(hub["destination"]["layer"]),
+                        retain_output=True,
+                        stop=True,
+                    ) as tr:
+                        model(**cur_zs_tok)
+                
+                cur_zs = tr.output[list(range(tr.output.shape[0])), idxs].T # shape [d_model, num_requests]
+                targets = zs - cur_zs
+                print("z error", torch.linalg.norm(targets, dim=0).mean())
+
+                repeat_factor = (layer_ks.size(1) // targets.size(1))
+                targets = targets.repeat_interleave(repeat_factor, dim=1)
+                resid = targets / (total_source_updates - updates_done)  # Distribute residual across remaining hub/source edits
+                weight_name = f"{hparams.rewrite_module_tmp.format(source['layer'])}.weight"
+                layer_device = weights[weight_name].device
+                proj = P[source["layer"]].to(device=layer_device, dtype=torch.float)
+                layer_ks = layer_ks.to(device=layer_device, dtype=torch.float)
+                resid = resid.to(device=layer_device, dtype=torch.float)
+                c = cache_c[source["layer"]].to(device=layer_device, dtype=torch.float)
+                k1k1 = layer_ks @ layer_ks.T
+                lhs = (
+                    proj @ (c + k1k1)
+                    + hparams.L2 * torch.eye(layer_ks.shape[0], dtype=torch.float, device=layer_device)
+                )
+                rhs = (
+                    proj @ layer_ks @ resid.T
+                )
+                upd_matrix = torch.linalg.solve(lhs, rhs)
+
+                # Adjust update matrix shape
+                upd_matrix = upd_matrix_match_shape(upd_matrix, weights[weight_name].shape)
+
+                print("orig norm", torch.linalg.norm(weights[weight_name]))
+                print("upd norm", torch.linalg.norm(upd_matrix))
+
+                # Update model weights and record desired changes in `delta` variable
+                with torch.no_grad():
+                    weights[weight_name][...] = weights[weight_name] + upd_matrix.float()
+                    if deltas.get(weight_name) is None:
+                        deltas[weight_name] = upd_matrix.detach().cpu()
+                    else:
+                        deltas[weight_name] += upd_matrix.detach().cpu()
+                
+                cache_c[source["layer"]] += (k1k1).to(cache_c[source["layer"]].device)
+                updates_done += 1
+                
+                # Clear GPU memory
+                #del U,S,cov
+                # for x in [layer_ks, cur_zs, targets]:
+                #     x.cpu()
+                #     del x
+                # torch.cuda.empty_cache()
 
     # Restore state of original model
     with torch.no_grad():

@@ -1,11 +1,11 @@
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, BatchEncoding
 
-from .compute_z import get_module_input_output_at_words
 from .AlphaEdit_Circuit_hparams import AlphaEditCircuitHyperParams
+from .position_utils import get_lookup_positions_in_target
 from ...util import nethook
 
 
@@ -16,6 +16,10 @@ def compute_ks(
     hparams: AlphaEditCircuitHyperParams,
     layer: int,
     context_templates: List[str],
+    source_enc: Optional[BatchEncoding] = None,
+    source_lookup_idx: Optional[int] = None,
+    rendered_source_prompt: Optional[str] = None,
+    raw_source_prompt: Optional[str] = None,
 ):
     all_prompts = []
     prompt_request_idx = []
@@ -54,20 +58,33 @@ def compute_ks(
     ).to(model.device)
     
     idxs = []
-    if hparams.fact_token == "subject_first":
-        for i in range(len(all_prompts)):
-            request = requests[prompt_request_idx[i]]
-            start_char = all_prompts[i].find(request["subject"])
-            start_tok = input_tok.char_to_token(i, start_char)
-            idxs.append(start_tok)
-    elif hparams.fact_token == "subject_last":
-        for i in range(len(all_prompts)):
-            request = requests[prompt_request_idx[i]]
-            start_char = all_prompts[i].find(request["subject"])
-            end_char = start_char + len(request["subject"]) - 1
-            start_tok = input_tok.char_to_token(i, start_char)
-            end_tok = input_tok.char_to_token(i, end_char)
-            idxs.append(end_tok)
+    if (source_enc is not None 
+        and source_lookup_idx is not None 
+        and rendered_source_prompt is not None 
+        and raw_source_prompt is not None):
+        idxs = get_lookup_positions_in_target(
+            source_enc=source_enc,
+            source_lookup_idx=source_lookup_idx,
+            rendered_source_prompt=rendered_source_prompt,
+            raw_source_prompt=raw_source_prompt,
+            target_enc=input_tok,
+            rendered_target_prompts=all_prompts,
+        )
+    else:
+        if hparams.fact_token == "subject_first":
+            for i in range(len(all_prompts)):
+                request = requests[prompt_request_idx[i]]
+                start_char = all_prompts[i].find(request["subject"])
+                start_tok = input_tok.char_to_token(i, start_char)
+                idxs.append(start_tok)
+        elif hparams.fact_token == "subject_last":
+            for i in range(len(all_prompts)):
+                request = requests[prompt_request_idx[i]]
+                start_char = all_prompts[i].find(request["subject"])
+                end_char = start_char + len(request["subject"]) - 1
+                start_tok = input_tok.char_to_token(i, start_char)
+                end_tok = input_tok.char_to_token(i, end_char)
+                idxs.append(end_tok)
     
     with torch.no_grad():
         with nethook.Trace(

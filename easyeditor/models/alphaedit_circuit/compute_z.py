@@ -1,13 +1,14 @@
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, BatchEncoding
 
 from ..rome import repr_tools
 from ...util import nethook
 
 from .AlphaEdit_Circuit_hparams import AlphaEditCircuitHyperParams
+from .position_utils import get_lookup_positions_in_target
 
 
 def compute_z(
@@ -17,6 +18,10 @@ def compute_z(
     hparams: AlphaEditCircuitHyperParams,
     layer: int,
     context_templates: List[str],
+    source_enc: Optional[BatchEncoding] = None,
+    source_lookup_idx: Optional[int] = None,
+    rendered_source_prompt: Optional[str] = None,
+    raw_source_prompt: Optional[str] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Computes the value (right) vector for the rank-1 update.
@@ -96,17 +101,45 @@ def compute_z(
     
     # Compute indices of the tokens where the fact is looked up
     lookup_idxs = []
-    if hparams.fact_token == "subject_first":
-        for i in range(len(all_prompts)):
-            start_char = all_prompts[i].find(request["subject"])
-            start_tok = input_tok.char_to_token(i, start_char)
-            lookup_idxs.append(start_tok)
-    elif hparams.fact_token == "subject_last":
-        for i in range(len(all_prompts)):
-            start_char = all_prompts[i].find(request["subject"])
-            end_char = start_char + len(request["subject"]) - 1
-            end_tok = input_tok.char_to_token(i, end_char)
-            lookup_idxs.append(end_tok)
+    if (source_enc is not None 
+        and source_lookup_idx is not None
+        and rendered_source_prompt is not None
+        and raw_source_prompt is not None):
+        lookup_idxs = get_lookup_positions_in_target(
+            source_enc=source_enc, 
+            source_lookup_idx=source_lookup_idx, 
+            rendered_source_prompt=rendered_source_prompt,
+            raw_source_prompt=raw_source_prompt,
+            target_enc=input_tok, 
+            rendered_target_prompts=all_prompts[:len(rewriting_prompts)],
+        )
+        if hparams.fact_token == "subject_first":
+            for i in range(len(rewriting_prompts), len(all_prompts)):
+                start_char = all_prompts[i].find(request["subject"])
+                start_tok = input_tok.char_to_token(i, start_char)
+                lookup_idxs.append(start_tok)
+        elif hparams.fact_token == "subject_last":
+            for i in range(len(rewriting_prompts), len(all_prompts)):
+                start_char = all_prompts[i].find(request["subject"])
+                end_char = start_char + len(request["subject"]) - 1
+                end_tok = input_tok.char_to_token(i, end_char)
+                lookup_idxs.append(end_tok)
+        # print(f"Source Prompt: {tok.decode(source_enc['input_ids'][0][:source_lookup_idx + 1])}")
+        # print(f"lookup_idxs: {lookup_idxs}")
+        # for i, lookup_idx in enumerate(lookup_idxs):
+        #     print(f"Prompt {i}: {tok.decode(input_tok['input_ids'][i][:lookup_idx + 1])}")
+    else:
+        if hparams.fact_token == "subject_first":
+            for i in range(len(all_prompts)):
+                start_char = all_prompts[i].find(request["subject"])
+                start_tok = input_tok.char_to_token(i, start_char)
+                lookup_idxs.append(start_tok)
+        elif hparams.fact_token == "subject_last":
+            for i in range(len(all_prompts)):
+                start_char = all_prompts[i].find(request["subject"])
+                end_char = start_char + len(request["subject"]) - 1
+                end_tok = input_tok.char_to_token(i, end_char)
+                lookup_idxs.append(end_tok)
 
     # Finalize rewrite and loss layers
     loss_layer = max(hparams.v_loss_layer, layer)
