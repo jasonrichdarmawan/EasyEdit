@@ -98,9 +98,10 @@ def apply_AlphaEdit_Circuit_to_model(
                 weights_copy[w_name] = w.detach().clone()
             w[...] += upd_matrix.float()
 
-    print(f"New weights successfully inserted into {list(deltas.keys())}")
-
-
+    if len(deltas) == 0:
+        print("No updates were made for these requests.")
+    else:
+        print(f"New weights successfully inserted into {list(deltas.keys())}")
 
     return model, weights_copy
 
@@ -127,10 +128,6 @@ def execute_AlphaEdit_Circuit(
                    print(f"Subject: {request['subject']} do not exist in prompt: {request['prompt']}")
         else:
             requests[i]['prompt'] = request['prompt'].replace('{}', request['subject'])
-        print(
-            f"Executing AlphaEdit_Circuit algo\n"
-            f"Request: [{request['prompt']}] [{request['target_true']}] -> [{request['target_new']}]"
-        )
 
     # Retrieve weights that user desires to change
     weights = {
@@ -148,6 +145,11 @@ def execute_AlphaEdit_Circuit(
     print(f"Context templates used for computing z and k/v pairs: {context_templates}")
 
     for request in requests:
+        print(
+            f"Executing AlphaEdit_Circuit algo\n"
+            f"Request: [{request['prompt']}] [{request['target_true']}] -> [{request['target_new']}]"
+        )
+        
         eap = EAPGraph(model)
         eap_prompts = []
         if not hparams.edit_with_chat_template:
@@ -190,7 +192,7 @@ def execute_AlphaEdit_Circuit(
             return_per_head_attribution=False,
             return_per_token_scores=True,
         )
-        top_mlp_hubs_by_token_sample = find_top_mlp_hubs_by_token_sample(scores, topk_hubs=3, topk_sources=3)
+        top_mlp_hubs_by_token_sample = find_top_mlp_hubs_by_token_sample(scores, topk_hubs=8, topk_sources=8)
         
         hubs_skipped = []
         hubs = []
@@ -200,17 +202,16 @@ def execute_AlphaEdit_Circuit(
                 continue
             
             shallow_layers = list(range(0, int(hparams.num_hidden_layers * 1/8)))
-            # deep_layers = list(range(int(hparams.num_hidden_layers * 7/8), hparams.num_hidden_layers))
+            deep_layers = list(range(int(hparams.num_hidden_layers * 7/8), hparams.num_hidden_layers))
             layers_not_to_edit = (
                 shallow_layers
-                # + deep_layers
+                + deep_layers
             )
             if hub["destination"]["layer"] in layers_not_to_edit:
                 hubs_skipped.append(hub)
                 continue
             
             hubs.append(hub)
-        hubs = sorted(hubs, key=lambda x: x["destination"]["layer"])
         
         sources_skipped = [[] for _ in range(len(hubs))]
         for hub_idx, hub in enumerate(hubs):
@@ -228,7 +229,9 @@ def execute_AlphaEdit_Circuit(
                     continue
                 
                 sources.append(source)
-            sources = sorted(sources, key=lambda x: x["layer"])
+            if len(sources[3:]) > 0:
+                sources_skipped[hub_idx].extend(sources[3:])
+            sources = sorted(sources[:3], key=lambda x: x["layer"])
             
             if len(sources) == 0:
                 hubs.remove(hub)
@@ -236,6 +239,10 @@ def execute_AlphaEdit_Circuit(
                 continue
             
             hub["sources"] = sources
+        
+        if len(hubs[3:]) > 0:
+            hubs_skipped.extend(hubs[3:])
+        hubs = sorted(hubs[:3], key=lambda x: x["destination"]["layer"])
         
         print(f"Hubs:\n{json.dumps(hubs, indent=4)}")
         if len(hubs_skipped) > 0:
@@ -389,8 +396,6 @@ def execute_AlphaEdit_Circuit(
         for k, v in weights.items():
             v[...] = weights_copy[k]
     
-    print(f"Deltas successfully computed for {list(deltas.keys())}")
-
     return deltas
 
 
