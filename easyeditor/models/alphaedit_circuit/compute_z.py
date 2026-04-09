@@ -158,6 +158,7 @@ def compute_z(
         raise NotImplementedError
     target_init, kl_distr_init = None, None
 
+    i_idx = range(len(lookup_idxs))
     # Inserts new "delta" variable at the appropriate part of the computation
     def edit_output_fn(cur_out, cur_layer):
         nonlocal target_init
@@ -174,14 +175,12 @@ def compute_z(
                     target_init = cur_out[0][0, lookup_idxs[0]].detach().clone()
 
             # Add intervened delta
-            for i, idx in enumerate(lookup_idxs):
-                if isinstance(cur_out, torch.Tensor):
-                    # Tested: meta-llama/Meta-Llama-3-8B
-                    cur_out[i, idx, :] += delta
-                elif len(lookup_idxs) != len(cur_out[0]):
-                    cur_out[0][idx, i, :] += delta
-                else:
-                    cur_out[0][i, idx, :] += delta
+            if isinstance(cur_out, torch.Tensor):
+                cur_out[i_idx, lookup_idxs, :] += delta
+            elif len(lookup_idxs) != len(cur_out[0]):
+                cur_out[0][lookup_idxs, i_idx, :] += delta
+            else:
+                cur_out[0][i_idx, lookup_idxs, :] += delta
 
         return cur_out
 
@@ -207,13 +206,10 @@ def compute_z(
             logits = model(**input_tok).logits
 
             # Compute distribution for KL divergence
-            kl_logits = torch.stack(
-                [
-                    logits[i - len(kl_prompts), idx, :]
-                    for i, idx in enumerate(lookup_idxs[-len(kl_prompts) :])
-                ],
-                dim=0,
-            )
+            num_kl = len(kl_prompts)
+            batch_idxs = list(range(-num_kl, 0))
+            seq_idxs = lookup_idxs[-num_kl:]
+            kl_logits = logits[batch_idxs, seq_idxs, :]
             kl_log_probs = torch.nn.functional.log_softmax(kl_logits, dim=1)
             if kl_distr_init is None:
                 kl_distr_init = kl_log_probs.detach().clone()

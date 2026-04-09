@@ -260,25 +260,25 @@ def execute_AlphaEdit_Circuit(
             print(f"Hub:\n{json.dumps(hub, indent=4)}")
             if len(sources_skipped[hub_idx]) > 0:
                 print(f"Skipped sources for this hub:\n{json.dumps(sources_skipped[hub_idx], indent=4)}")
-
-            z_list = []
-            cur_z = compute_z(
-                model,
-                tok,
-                request,
-                hparams,
-                hub["destination"]["layer"],
-                context_templates,
-                source_enc=eap_tok,
-                source_lookup_idx=hub["position"],
-                rendered_source_prompt=eap_prompts[0],
-                raw_source_prompt=request["prompt"],
-            )
-            
-            z_list.append(cur_z)
-            zs = torch.stack(z_list, dim=1) # shape [d_model, num_requests]
             
             for source in hub["sources"]:
+                z_list = []
+                cur_z = compute_z(
+                    model,
+                    tok,
+                    request,
+                    hparams,
+                    hub["destination"]["layer"],
+                    context_templates,
+                    source_enc=eap_tok,
+                    source_lookup_idx=hub["position"],
+                    rendered_source_prompt=eap_prompts[0],
+                    raw_source_prompt=request["prompt"],
+                )
+                
+                z_list.append(cur_z)
+                zs = torch.stack(z_list, dim=1) # shape [d_model, num_requests]
+                
                 # Get current model activations
                 layer_ks = compute_ks(
                     model,
