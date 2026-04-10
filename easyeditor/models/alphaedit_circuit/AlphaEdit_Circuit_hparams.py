@@ -6,8 +6,9 @@ import yaml
 
 
 @dataclass
-class AlphaEditHyperParams(HyperParams):
+class AlphaEditCircuitHyperParams(HyperParams):
     # Method
+    num_hidden_layers: int
     layers: List[int]
     layer_selection: Literal["all", "random"]
     fact_token: Literal[
@@ -40,8 +41,15 @@ class AlphaEditHyperParams(HyperParams):
     alg_name: str
     device: int
     model_name: str
+    edit_with_chat_template: bool
     stats_dir: str
-    P_loc: str
+    
+    # Destination node
+    hook_q_input: str
+    hook_k_input: str
+    hook_v_input: str
+    hook_mlp_in: str
+    hook_resid_post: str
 
     max_length: int = 40
     batch_size: int = 1
@@ -57,6 +65,9 @@ class AlphaEditHyperParams(HyperParams):
             config = yaml.safe_load(stream)
             config = super().construct_float_from_scientific_notation(config)
 
-        assert (config and config['alg_name'] == 'AlphaEdit') or print(f'AlphaEditHyperParams can not load from {hparams_name_or_path}, '
-                                                f'alg_name is {config["alg_name"]} ')
+        assert (config and config['alg_name'] == 'AlphaEdit_Circuit') \
+            or print(
+                f'AlphaEditCircuitHyperParams can not load from {hparams_name_or_path}, '
+                f'alg_name is {config["alg_name"]}'
+            )
         return cls(**config)

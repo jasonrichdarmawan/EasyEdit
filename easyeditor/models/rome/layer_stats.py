@@ -7,8 +7,11 @@ from tqdm.auto import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ...util.globals import *
-from ...util.nethook import Trace, set_requires_grad
-from ...util.runningstats import CombinedStat, Mean, NormMean, SecondMoment, tally
+from ...util.nethook import TraceDict, set_requires_grad
+from ...util.runningstats import (
+    CombinedStat, Mean, NormMean, SecondMoment,
+    make_loader, save_cached_state, load_cached_state
+)
 
 from .tok_dataset import (
     TokenizedDataset,
@@ -35,43 +38,49 @@ def main():
     def aa(*args, **kwargs):
         parser.add_argument(*args, **kwargs)
 
-    aa("--model_name", default="gpt2-xl", choices=["gpt2-xl", "EleutherAI/gpt-j-6B"])
+    aa("--model_name", default="gpt2-xl", choices=["gpt2-xl", "EleutherAI/gpt-j-6B", "Qwen/Qwen3-4B-Instruct-2507"])
+    aa("--apply_chat_template", action="store_true")
     aa("--dataset", default="wikipedia", choices=["wikitext", "wikipedia"])
     aa("--layers", default=[17], type=lambda x: list(map(int, x.split(","))))
+    aa("--layer_tmp", default=["model.layers.{}.mlp.down_proj"], type=lambda x: x.split(","))
     aa("--to_collect", default=["mom2"], type=lambda x: x.split(","))
     aa("--sample_size", default=100000, type=lambda x: None if x == "all" else int(x))
+    aa("--batch_size", default=100, type=int)
     aa("--batch_tokens", default=None, type=lambda x: None if x == "any" else int(x))
     aa("--precision", default="float32", choices=["float64", "float32", "float16"])
-    aa("--stats_dir", default=STATS_DIR)
+    aa("--stats_dir", default="data/stats", type=str)
     aa("--download", default=1, type=int, choices=[0, 1])
     args = parser.parse_args()
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
-    model = AutoModelForCausalLM.from_pretrained(args.model_name).eval().cuda()
+    model = AutoModelForCausalLM.from_pretrained(args.model_name, device_map="auto").eval()
     set_requires_grad(False, model)
 
-    for layer_num in args.layers:
-        print(
-            f"Computing stats for layer {layer_num} of {args.model_name} "
-            f'over {args.sample_size or "all"} samples of {args.dataset}. '
-            "Note, the statistics are collected over the inputs to the second MLP layer, "
-            "or equivalently the outputs of the first MLP layer."
-        )
-        proj_layer_name = "c_proj" if "gpt2" in args.model_name else "fc_out"
-        layer_name = f"transformer.h.{layer_num}.mlp.{proj_layer_name}"
+    print(
+        f"Computing stats for layer {args.layers} of {args.model_name} "
+        f'over {args.sample_size or "all"} samples of {args.dataset}. '
+        "Note, the statistics are collected over the inputs to the second MLP layer, "
+        "or equivalently the outputs of the first MLP layer."
+    )
 
-        layer_stats(
-            model,
-            tokenizer,
-            layer_name,
-            args.stats_dir,
-            args.dataset,
-            args.to_collect,
-            sample_size=args.sample_size,
-            precision=args.precision,
-            batch_tokens=args.batch_tokens,
-            download=args.download,
-        )
+    layer_stats(
+        model,
+        tokenizer,
+        [
+            layer_name.format(layer_num=layer_num)
+            for layer_num in args.layers
+            for layer_name in args.layer_tmp
+        ],
+        args.stats_dir,
+        args.dataset,
+        args.to_collect,
+        sample_size=args.sample_size,
+        precision=args.precision,
+        batch_tokens=args.batch_tokens,
+        download=args.download,
+        batch_size=args.batch_size,
+        apply_chat_template=args.apply_chat_template
+    )
 
 
 def layer_stats(
@@ -88,11 +97,16 @@ def layer_stats(
     download=True,
     progress=tqdm,
     force_recompute=False,
-    hparams=None
+    hparams=None,
+    batch_size=100, # Examine this many dataset texts at once
+    apply_chat_template=False,
 ):
     """
     Function to load or compute cached stats.
     """
+    
+    if isinstance(layer_name, str):
+        layer_name = [layer_name]
 
     def get_ds():
         # Load_From_File
@@ -101,7 +115,7 @@ def layer_stats(
         # raw_ds = {'train': raw_ds}
         raw_ds = load_dataset(
             ds_name,
-            dict(wikitext="wikitext-103-raw-v1", wikipedia="20200501.en")[ds_name]
+            dict(wikitext="wikitext-103-raw-v1", wikipedia="20220301.en")[ds_name]
         )
         if hasattr(model.config, 'n_positions'):
             maxlen = model.config.n_positions
@@ -124,10 +138,9 @@ def layer_stats(
 
         if batch_tokens is not None and batch_tokens < maxlen:
             maxlen = batch_tokens
-        return TokenizedDataset(raw_ds["train"], tokenizer, maxlen=maxlen)
+        return TokenizedDataset(raw_ds["train"], tokenizer, maxlen=maxlen, apply_chat_template=apply_chat_template)
 
     # Continue with computation of statistics
-    batch_size = 100  # Examine this many dataset texts at once
     if hasattr(model.config, 'n_positions'):
         npos = model.config.n_positions
     elif hasattr(model.config, 'max_sequence_length'):
@@ -154,47 +167,82 @@ def layer_stats(
     dtype = getattr(torch, precision)
     size_suffix = "" if sample_size is None else f"_{sample_size}"
     if batch_tokens < npos:
-        size_suffix = "_t{batch_tokens}" + size_suffix
+        size_suffix = f"_t{batch_tokens}" + size_suffix
     if model_name is None:
         # model_name = model.config._name_or_path.replace("/", "_")
         model_name = model.config._name_or_path.rsplit("/")[-1]
 
     stats_dir = Path(stats_dir)
-    file_extension = f"{model_name}/{ds_name}_stats/{layer_name}_{precision}_{'-'.join(sorted(to_collect))}{size_suffix}.npz"
-    filename = stats_dir / file_extension
 
     print(f"Computing Cov locally....")
 
-    ds = get_ds() if not filename.exists() else None
+    ds = get_ds()
+    
+    args = {"sample_size": sample_size}
 
+    stats = {}
+    for ln in layer_name:
+        file_extension = f"{model_name}/{ds_name}_stats/{ln}_{precision}_{'-'.join(sorted(to_collect))}{size_suffix}.npz"
+        filename = stats_dir / file_extension
+        
+        stat = CombinedStat(**{k: STAT_TYPES[k]() for k in to_collect})
+        print(f"Trying to load cached stats from {filename}...")
+        cached_state = load_cached_state(filename, args)
+        if cached_state is not None and not force_recompute:
+            stat.load_state_dict(cached_state)
+        
+        stats[ln] = (filename, stat, cached_state is not None)
+        
+    loader = (
+        make_loader(
+            ds,
+            sample_size=sample_size,
+            batch_size=batch_size,
+            collate_fn=length_collation(batch_tokens),
+            pin_memory=True,
+            random_sample=1,
+            # num_workers=2,
+        )
+        if any(not cached for _, _, cached in stats.values())
+        else []
+    )
+    
     if progress is None:
         progress = lambda x: x
-
-    stat = CombinedStat(**{k: STAT_TYPES[k]() for k in to_collect})
-    loader = tally(
-        stat,
-        ds,
-        cache=(filename if not force_recompute else None),
-        sample_size=sample_size,
-        batch_size=batch_size,
-        collate_fn=length_collation(batch_tokens),
-        pin_memory=True,
-        random_sample=1,
-        num_workers=2,
-    )
+    
+    first_index_printed = False
     batch_count = -(-(sample_size or len(ds)) // batch_size)
     with torch.no_grad():
         for batch_group in progress(loader, total=batch_count):
             for batch in batch_group:
-                batch = dict_to_(batch, f"cuda:{hparams.device}")
-                with Trace(
+                batch = dict_to_(batch, model.device)
+                
+                if not first_index_printed:
+                    text = tokenizer.decode(batch["input_ids"][0])
+                    print(f"{'=' * 100}\nExample (length {len(batch['input_ids'][0])}):\n{text}\n{'=' * 100}")
+                    first_index_printed = True
+                
+                with TraceDict(
                     model, layer_name, retain_input=True, retain_output=False, stop=True
                 ) as tr:
-                    model(**batch)
-                feats = flatten_masked_batch(tr.input, batch["attention_mask"])
-                # feats = flatten_masked_batch(tr.output, batch["attention_mask"])
-                feats = feats.to(dtype=dtype)
-                stat.add(feats)
+                    model(**batch, use_cache=False)
+                
+                for ln, (_, stat, cached) in stats.items():
+                    if cached:
+                        continue
+                    # tr[ln].input shape: (batch, seq, dim)
+                    # if layer_name is "model.layers.{layer_num}.mlp.down_proj", dim is the MLP hidden size
+                    # feats shape: (batch * seq, dim)
+                    # if stat is SecondMoment, stat shape is (dim, dim)
+                    feats = flatten_masked_batch(tr[ln].input, batch["attention_mask"])
+                    # feats = flatten_masked_batch(tr[ln].output, batch["attention_mask"])
+                    feats = feats.to(dtype=dtype)
+                    stat.add(feats)
+    
+    for ln, (filename, stat, cached) in stats.items():
+        if cached:
+            continue
+        save_cached_state(filename, stat, args)
     return stat
 
 
