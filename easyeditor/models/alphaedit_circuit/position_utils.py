@@ -1,6 +1,7 @@
 # %%
 
 from transformers import AutoTokenizer, BatchEncoding
+import json
 
 # %%
 
@@ -18,16 +19,16 @@ def get_lookup_positions_in_target(
     raw_source_prompt: "Nick Bottom was created by"
     rendered_target_prompts: ['{prefix} {prompt}', ...] or with chat template
     """
-    char_span = source_enc.token_to_chars(source_lookup_idx)
+    char_span = source_enc.token_to_chars(source_lookup_idx) # [start, end) exclusive
     
-    offset_in_source = rendered_source_prompt.find(raw_source_prompt)
-    re_end = char_span.end - 1 - offset_in_source
+    offset_in_source = rendered_source_prompt.find(raw_source_prompt) # [start
+    re_end = char_span.end - offset_in_source # end) exclusive
     
     token_positions = []
     for i, prompt in enumerate(rendered_target_prompts):
         offset_in_target = prompt.find(raw_source_prompt)
-        target_char_end = offset_in_target + re_end - 1
-        target_token_end = target_enc.char_to_token(i, target_char_end)
+        target_char_end = offset_in_target + re_end - 1 # end] inclusive
+        target_token_end = target_enc.char_to_token(i, target_char_end) # expects inclusive
         token_positions.append(target_token_end)
     
     return token_positions
@@ -41,9 +42,15 @@ if __name__ == "__main__":
 
 if __name__ == "__main__":
     EDIT_WITH_CHAT_TEMPLATE = False
-    raw_source_prompt = "Nick Bottom was created by"
-    lookup = "was"
-    target_new = "Benozzo Gozzoli"
+    
+    # Example 1:
+    # raw_source_prompt = "Nick Bottom was created by"
+    # lookup = "was"
+    # target_new = "Benozzo Gozzoli"
+    
+    # Example 2:
+    raw_source_prompt = "Amit Shah works in the field of"
+    target_new = "musician"
     
     source_prompt = raw_source_prompt
     context_templates = [
@@ -72,6 +79,7 @@ if __name__ == "__main__":
             ], add_generation_prompt=True, tokenize=False)
             for prompt in target_prompts
         ]
+    print(json.dumps(target_prompts, indent=4))
     
     tok.padding_side = "right"
     source_enc = tok(
@@ -80,10 +88,15 @@ if __name__ == "__main__":
         padding=True,
         add_special_tokens=not EDIT_WITH_CHAT_TEMPLATE,
     )
-    offset = source_prompt.find(raw_source_prompt)
-    start_char = offset + raw_source_prompt.find(lookup)
-    end_char = start_char + len(lookup) - 1
-    end_tok = source_enc.char_to_token(0, end_char)
+    
+    # Example 1:
+    # offset = source_prompt.find(raw_source_prompt)
+    # start_char = offset + raw_source_prompt.find(lookup)
+    # end_char = start_char + len(lookup) - 1
+    # end_tok = source_enc.char_to_token(0, end_char)
+    
+    # Example 2:
+    end_tok = 0
     
     target_enc = tok(
         target_prompts,
@@ -102,6 +115,6 @@ if __name__ == "__main__":
     )
     
     for i, lookup_idx in enumerate(lookup_idxs):
-        print(f"Prompt {i}: {tok.decode(target_enc['input_ids'][i][:lookup_idx])}")
+        print(f"Prompt {i}: {tok.decode(target_enc['input_ids'][i][lookup_idx])}")
 
 # %%
