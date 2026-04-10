@@ -62,7 +62,10 @@ def apply_AlphaEdit_to_model(
         P_loaded = True
     elif P_loaded == False:
         P = torch.load(hparams.P_loc)
-        P = [P[i].contiguous() for i in range(P.shape[0])]
+        if isinstance(P, torch.Tensor):
+            P = [P[i].contiguous() for i in range(P.shape[0])]
+        else:
+            P = [P[i].contiguous() for i in range(len(P))]
         P_loaded = True
 
     # Maintain the global variable cache_c to avoid redundant computations.
