@@ -1,9 +1,10 @@
 alg_name: "AlphaEdit_Circuit"
 model_name: "meta-llama/Meta-Llama-3-8B"
+num_hidden_layers: 32
 edit_with_chat_template: False
 stats_dir: "./data/stats"
 # Make sure that the projection matrix P has been downloaded from the baidu netdisk (For details, please refer to the EasyEdit/easyeditor/models/alphaedit/README.md) beforehand to avoid double computation.
-# But if the projection matrix P which we provided is not needed, then nothing needs to be done to the P_loc field; 
+# But if the projection matrix P which we provided is not needed, then nothing needs to be done to the P_loc field;
 # just run the program, and the program will compute P and save it locally automatically.
 device: 0
 layers: [4, 5, 6, 7, 8]
@@ -29,3 +30,10 @@ mom2_n_samples: 100000
 mom2_dtype: "float32"
 nullspace_threshold: 2e-2
 L2: 1
+
+# EAP hook names (used by eap_graph.py for circuit discovery)
+hook_q_input: "model.layers.{}.self_attn.q_proj"
+hook_k_input: "model.layers.{}.self_attn.k_proj"
+hook_v_input: "model.layers.{}.self_attn.v_proj"
+hook_mlp_in: "model.layers.{}.mlp.gate_proj"
+hook_resid_post: "model.layers.{}"
