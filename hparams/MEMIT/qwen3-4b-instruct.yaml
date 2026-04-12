@@ -1,14 +1,13 @@
-alg_name: "AlphaEdit"
+alg_name: "MEMIT"
 model_name: "Qwen/Qwen3-4B-Instruct-2507"
 stats_dir: "./data/stats"
-P_loc: "./data/stats/Qwen3-4B-Instruct-2507/wikipedia_stats/null_space_project_float32__t4096_100000.pt"
-device: 0
+device: 5
 layers: [4, 5, 6, 7, 8]
-clamp_norm_factor: 4
+clamp_norm_factor: 0.75
 layer_selection: "all"
 fact_token: "subject_last"
-v_num_grad_steps: 25
-v_lr: 1e-1
+v_num_grad_steps: 20
+v_lr: 5e-1
 v_loss_layer: 35
 v_weight_decay: 0.5
 kl_factor: 0.0625
@@ -21,8 +20,7 @@ attn_module_tmp: "model.layers.{}.self_attn"
 ln_f_module: "model.norm"
 lm_head_module: "lm_head"
 mom2_dataset: "wikipedia"
-mom2_batch_tokens: 4096
 mom2_n_samples: 100000
 mom2_dtype: "float32"
-nullspace_threshold: 2e-2
-L2: 10
+mom2_batch_tokens: 4096
+model_parallel: False

@@ -107,21 +107,48 @@ def tokenize(batch, tokenizer, device, context_templates=None, hparams=None):
     deact_masks = []
     # Iterate through each batch entry and compute act_mask, deact_mask
     for i, loc_prompt in enumerate(loc_prompts):
-        if loc_prompt in prompts[i]:  # subject: Factual Editing
-            subject_token = tokenizer.encode(' ' + loc_prompt, add_special_tokens=False)
-            subject_token1 = tokenizer.encode(loc_prompt, add_special_tokens=False)
-            subject_length = len(subject_token)
-            act_mask = torch.zeros_like(tokens['input_ids'][int(i*len_temp):int((i+1)*len_temp)])
-            deact_mask = torch.zeros_like(tokens['input_ids'][int(i*len_temp):int((i+1)*len_temp)])
-            for j, token in enumerate(tokens['input_ids'][int(i*len_temp):int((i+1)*len_temp)]):
-                start_idx = find_sublist_start_index(token.detach().cpu().numpy().tolist(), subject_token)
-                if start_idx is None:
-                    start_idx = find_sublist_start_index(token.detach().cpu().numpy().tolist(), subject_token1)
-                    subject_length = len(subject_token1)
+        prompt_slice = tokens['input_ids'][int(i * len_temp):int((i + 1) * len_temp)]
+        act_mask = torch.zeros_like(prompt_slice)
+        deact_mask = torch.zeros_like(prompt_slice)
+
+        candidate_texts = []
+        if 'subject' in batch[i] and isinstance(batch[i]['subject'], str) and batch[i]['subject'].strip():
+            candidate_texts.append(batch[i]['subject'].strip())
+        if isinstance(loc_prompt, str) and loc_prompt.strip():
+            loc_prompt_clean = loc_prompt.strip()
+            candidate_texts.append(loc_prompt_clean)
+            loc_prompt_parts = loc_prompt_clean.rsplit(' ', 1)
+            if len(loc_prompt_parts) > 1 and loc_prompt_parts[0].strip():
+                candidate_texts.append(loc_prompt_parts[0].strip())
+
+        matched_rows = 0
+        for j, token in enumerate(prompt_slice):
+            token_list = token.detach().cpu().numpy().tolist()
+            start_idx = None
+            subject_length = 0
+            for candidate in candidate_texts:
+                subject_token = tokenizer.encode(' ' + candidate, add_special_tokens=False)
+                subject_token1 = tokenizer.encode(candidate, add_special_tokens=False)
+
+                if len(subject_token) > 0:
+                    start_idx = find_sublist_start_index(token_list, subject_token)
+                    if start_idx is not None:
+                        subject_length = len(subject_token)
+                        break
+
+                if len(subject_token1) > 0:
+                    start_idx = find_sublist_start_index(token_list, subject_token1)
+                    if start_idx is not None:
+                        subject_length = len(subject_token1)
+                        break
+
+            if start_idx is not None and subject_length > 0:
+                matched_rows += 1
                 act_mask[j][start_idx: start_idx + subject_length] = 1
                 deact_mask[j][:start_idx] = 1
                 deact_mask[j][start_idx + subject_length:] = 1
-        else:  # General Editing
+
+        if matched_rows != prompt_slice.shape[0]:  # General Editing
             act_mask = None
             deact_mask = None
 

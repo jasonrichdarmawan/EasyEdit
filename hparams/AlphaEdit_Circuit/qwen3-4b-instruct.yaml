@@ -28,7 +28,7 @@ mom2_batch_tokens: 4096
 mom2_n_samples: 100000
 mom2_dtype: "float32"
 nullspace_threshold: 2e-2
-L2: 1
+L2: 10
 
 # Destination node
 hook_q_input: "model.layers.{}.self_attn.q_proj"

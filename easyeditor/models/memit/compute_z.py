@@ -25,7 +25,7 @@ def compute_z(
 
     # Get model parameters
     lm_w, ln_f = (
-        nethook.get_parameter(model, f"{hparams.lm_head_module}.weight").T,
+        nethook.get_module(model, f"{hparams.lm_head_module}").weight.T,
         nethook.get_module(model, hparams.ln_f_module),
     )
     try:
@@ -236,19 +236,16 @@ def get_module_input_output_at_words(
             track="both", subtoken=subtoken, **context_info, **word_repr_args
         )
     elif fact_token_strategy == "last":
-        raise Exception("This is definitely bugged, fix it.")
         context_info = dict(
-            contexts=[
-                tmp[i].format(words[i]) for i, tmp in enumerate(context_templates)
-            ],
-            idxs=[000000],
+            context_templates=context_templates,
+            words=words,
         )
         if track == 'out' or track == 'in':
             return repr_tools.get_reprs_at_word_tokens(
-                track=track, subtoken=subtoken, **context_info, **word_repr_args
+                track=track, subtoken=fact_token_strategy, **context_info, **word_repr_args
             )
-        l_input, l_output = repr_tools.get_reprs_at_idxs(
-            track="both", **context_info, **word_repr_args
+        l_input, l_output = repr_tools.get_reprs_at_word_tokens(
+            track="both", subtoken=fact_token_strategy, **context_info, **word_repr_args
         )
     else:
         raise ValueError(f"fact_token={fact_token_strategy} not recognized")
