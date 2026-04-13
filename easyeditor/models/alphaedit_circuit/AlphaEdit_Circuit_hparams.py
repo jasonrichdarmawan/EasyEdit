@@ -34,7 +34,6 @@ class AlphaEditCircuitHyperParams(HyperParams):
     # Statistics
     mom2_dataset: str
     mom2_n_samples: int
-    mom2_batch_tokens: int
     mom2_dtype: str
     nullspace_threshold: float
     L2: float
@@ -51,6 +50,7 @@ class AlphaEditCircuitHyperParams(HyperParams):
     hook_mlp_in: str
     hook_resid_post: str
 
+    mom2_batch_tokens: int = None
     max_length: int = 40
     batch_size: int = 1
     model_parallel: bool = False

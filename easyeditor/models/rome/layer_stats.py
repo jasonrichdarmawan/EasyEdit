@@ -38,7 +38,7 @@ def main():
     def aa(*args, **kwargs):
         parser.add_argument(*args, **kwargs)
 
-    aa("--model_name", default="gpt2-xl", choices=["gpt2-xl", "EleutherAI/gpt-j-6B", "Qwen/Qwen3-4B-Instruct-2507"])
+    aa("--model_name", default="gpt2-xl", choices=["gpt2-xl", "EleutherAI/gpt-j-6B", "Qwen/Qwen3-4B-Instruct-2507", "meta-llama/Meta-Llama-3-8B"])
     aa("--apply_chat_template", action="store_true")
     aa("--dataset", default="wikipedia", choices=["wikitext", "wikipedia"])
     aa("--layers", default=[17], type=lambda x: list(map(int, x.split(","))))
@@ -113,10 +113,10 @@ def layer_stats(
         # from datasets import Dataset
         # raw_ds = Dataset.from_file('XXX/XXX/wikipedia-train.arrow')
         # raw_ds = {'train': raw_ds}
-        raw_ds = load_dataset(
-            ds_name,
-            dict(wikitext="wikitext-103-raw-v1", wikipedia="20220301.en")[ds_name]
-        )
+        ds_map = dict(wikitext=("wikitext", "wikitext-103-raw-v1"),
+                      wikipedia=("wikimedia/wikipedia", "20231101.en"))
+        ds_repo, ds_config = ds_map[ds_name]
+        raw_ds = load_dataset(ds_repo, ds_config)
         if hasattr(model.config, 'n_positions'):
             maxlen = model.config.n_positions
         elif hasattr(model.config, 'max_sequence_length'):
