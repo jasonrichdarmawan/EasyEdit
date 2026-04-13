@@ -107,6 +107,8 @@ def compute_z(
                     cur_out[i, idx, :] += delta
                 elif len(lookup_idxs) != len(cur_out[0]):
                     cur_out[0][idx, i, :] += delta
+                else:
+                    cur_out[0][i, idx, :] += delta
 
         return cur_out
 
