@@ -3,6 +3,7 @@ from typing import List
 import yaml
 
 from ...util.hparams import HyperParams
+from typing import Optional
 
 
 @dataclass
@@ -46,6 +47,8 @@ class R_ROMEHyperParams(HyperParams):
     enable_random_prefix_keys: bool = True
     # Original ROME implementation overrides other options, uses both computations in the update equation
     original_implementation: bool = False
+    
+    mom2_batch_tokens: Optional[int] = None
 
     @classmethod
     def from_hparams(cls, hparams_name_or_path: str):

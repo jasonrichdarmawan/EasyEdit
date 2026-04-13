@@ -21,6 +21,7 @@ def get_inv_cov(
     layer_name: str,
     mom2_dataset: str,
     mom2_n_samples: str,
+    mom2_batch_tokens: int,
     mom2_dtype: str,
     hparams=None,
 ) -> torch.Tensor:
@@ -48,6 +49,7 @@ def get_inv_cov(
             to_collect=["mom2"],
             sample_size=mom2_n_samples,
             precision=mom2_dtype,
+            batch_tokens=mom2_batch_tokens,
             hparams=hparams
         )
         inv_mom2_cache[key] = torch.inverse(
@@ -109,7 +111,7 @@ def compute_u(
         raise ValueError(f"fact_token={hparams.fact_token} not recognized")
 
     # Apply inverse second moment adjustment
-    u = cur_repr
+    u = cur_repr.float()
     if hparams.mom2_adjustment:
         u = get_inv_cov(
             model,
@@ -117,6 +119,7 @@ def compute_u(
             hparams.rewrite_module_tmp.format(layer),
             hparams.mom2_dataset,
             hparams.mom2_n_samples,
+            hparams.mom2_batch_tokens,
             hparams.mom2_dtype,
             hparams=hparams,
         ) @ u.unsqueeze(1)

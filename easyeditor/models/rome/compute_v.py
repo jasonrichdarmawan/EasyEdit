@@ -187,12 +187,13 @@ def compute_v(
     )
 
     # Solving the linear system to compute the right vector
-    right_vector = (target - cur_output) / torch.dot(cur_input, left_vector)
+    division_factor = torch.dot(cur_input.float(), left_vector)
+    right_vector = (target - cur_output).float() / division_factor
     print(f"Delta norm: {(target - cur_output).norm().item()}")
     print(
         f"Change in target norm: {target_init.norm().item()} to {target.norm().item()} => {(target.norm() - target_init.norm()).item()}"
     )
-    print(f"Division Factor: {torch.dot(cur_input, left_vector).item()}")
+    print(f"Division Factor: {division_factor.item()}")
     print(f"Right vector norm: {right_vector.norm()}")
 
     return right_vector

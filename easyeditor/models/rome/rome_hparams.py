@@ -4,6 +4,7 @@ import yaml
 
 from ...util.hparams import HyperParams
 
+from typing import Optional
 
 @dataclass
 class ROMEHyperParams(HyperParams):
@@ -39,6 +40,7 @@ class ROMEHyperParams(HyperParams):
     max_length: int = 40
     model_parallel: bool = False
     fp16: bool = False
+    mom2_batch_tokens: Optional[int] = None
 
     @classmethod
     def from_hparams(cls, hparams_name_or_path: str):
