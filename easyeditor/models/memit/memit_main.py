@@ -47,7 +47,7 @@ def apply_memit_to_model(
 
     with torch.no_grad():
         for w_name, (key_mat, val_mat) in deltas.items():
-            key_mat, val_mat = key_mat.to(f"cuda:{hparams.device}"), val_mat.to(f"cuda:{hparams.device}")
+            key_mat, val_mat = key_mat.to(model.device), val_mat.to(model.device)
             upd_matrix = key_mat @ val_mat.T
             w = nethook.get_parameter(model, w_name)
             upd_matrix = upd_matrix_match_shape(upd_matrix, w.shape)
@@ -127,7 +127,7 @@ def execute_memit(
         ):
             try:
                 data = np.load(cache_fname)
-                z_list.append(torch.from_numpy(data["v_star"]).to(f"cuda:{hparams.device}"))
+                z_list.append(torch.from_numpy(data["v_star"]).to(model.device))
                 data_loaded = True
             except Exception as e:
                 print(f"Error reading cache file due to {e}. Recomputing...")
@@ -193,6 +193,7 @@ def execute_memit(
             if not force_recompute
             else hparams.mom2_n_samples // 10,
             hparams.mom2_dtype,
+            hparams.mom2_batch_tokens,
             force_recompute=force_recompute,
             hparams=hparams
         )
@@ -249,6 +250,7 @@ def get_cov(
     mom2_dataset: str,
     mom2_n_samples: str,
     mom2_dtype: str,
+    mom2_batch_tokens: int = None,
     inv: bool = False,
     force_recompute: bool = False,
     hparams=None,
@@ -272,13 +274,14 @@ def get_cov(
             to_collect=["mom2"],
             sample_size=mom2_n_samples,
             precision=mom2_dtype,
+            batch_tokens=mom2_batch_tokens,
             hparams=hparams,
             force_recompute=force_recompute,
         )
         COV_CACHE[key] = stat.mom2.moment().float().to("cpu")
 
     return (
-        torch.inverse(COV_CACHE[key].to(f"cuda:{hparams.device}")) if inv else COV_CACHE[key].to(f"cuda:{hparams.device}")
+        torch.inverse(COV_CACHE[key].to(model.device)) if inv else COV_CACHE[key].to(model.device)
     )
 
 

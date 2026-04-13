@@ -16,13 +16,14 @@ from .compute_ks import compute_ks
 from .compute_z import compute_z, get_module_input_output_at_words, find_fact_lookup_idx
 from .AlphaEdit_hparams import AlphaEditHyperParams
 
+from tqdm.auto import tqdm
+
 # Cache variable(s)
 CONTEXT_TEMPLATES_CACHE = None
 COV_CACHE = {}
 
 P_loaded = False
 cache_c_new = False
-INITIAL_WEIGHT_NORMS = {}  # Fixed reference norms recorded only on first call
 
 def apply_AlphaEdit_to_model(
     model: AutoModelForCausalLM,
@@ -43,7 +44,7 @@ def apply_AlphaEdit_to_model(
     :return: (1) the updated model, (2) an original copy of the weights that changed
     """
 
-    global P, P_loaded, cache_c, cache_c_new, INITIAL_WEIGHT_NORMS
+    global P, P_loaded, cache_c, cache_c_new
 
     weights_copy = {}
     if copy:
@@ -53,44 +54,31 @@ def apply_AlphaEdit_to_model(
     # Please ensure that you have downloaded "null_space_project.pt" to the easyedit folder beforehand, or get the P by following calculation
     if not os.path.exists(hparams.P_loc):
         print(f"The null-space projection matrix P does not exist and now calculate.")
-        W_out = nethook.get_parameter(model, f"{hparams.rewrite_module_tmp.format(hparams.layers[-1])}.weight")
-        if "llama" in hparams.model_name.lower() or "gpt-j-6b" in hparams.model_name.lower():
-            P = torch.zeros((len(hparams.layers), W_out.shape[1], W_out.shape[1]), device="cpu")
-        elif "gpt2-xl" in hparams.model_name.lower():
-            P = torch.zeros((len(hparams.layers), W_out.shape[0], W_out.shape[0]), device="cpu")
-        elif "qwen" in hparams.model_name.lower():
-            P = torch.zeros((len(hparams.layers), W_out.shape[1], W_out.shape[1]), device="cpu")
-        del W_out
-        for i, layer in enumerate(hparams.layers):
-            P[i,:,:] = get_project(model, tok, layer, hparams)
-        torch.save(P, "null_space_project.pt")
+        P = [None for _ in hparams.layers]
+        for i, layer in tqdm(enumerate(hparams.layers), desc="Computing projection matrix"):
+            P[i] = get_project(model, tok, layer, hparams)
+        print("Saving null-space projection matrix P to avoid redundant future computations...")
+        torch.save(P, hparams.P_loc)
         P_loaded = True
     elif P_loaded == False:
         P = torch.load(hparams.P_loc)
+        if isinstance(P, torch.Tensor):
+            P = [P[i].contiguous() for i in range(P.shape[0])]
+        else:
+            P = [P[i].contiguous() for i in range(len(P))]
         P_loaded = True
 
     # Maintain the global variable cache_c to avoid redundant computations.
     # If this is the first calculation (i.e., cache_c_new == false), then initialize cache_c first
     if not cache_c_new:
         W_out = nethook.get_parameter(model, f"{hparams.rewrite_module_tmp.format(hparams.layers[-1])}.weight")
-        if "llama" in hparams.model_name.lower() or "gpt-j-6b" in hparams.model_name.lower():
-            cache_c = torch.zeros((len(hparams.layers), W_out.shape[1], W_out.shape[1]), device="cpu")
+        if any(item for item in ["llama", "gpt-j-6b", "qwen3-4b"] if item in hparams.model_name.lower()):
+            cache_c_shape = (W_out.shape[1], W_out.shape[1])
         elif "gpt2-xl" in hparams.model_name.lower():
-            cache_c = torch.zeros((len(hparams.layers), W_out.shape[0], W_out.shape[0]), device="cpu")
-        elif "qwen" in hparams.model_name.lower():
-            cache_c = torch.zeros((len(hparams.layers), W_out.shape[1], W_out.shape[1]), device="cpu")
+            cache_c_shape = (W_out.shape[0], W_out.shape[0])
+        cache_c = [torch.zeros(cache_c_shape, device=W_out.device) for _ in hparams.layers]
         del W_out
         cache_c_new = True
-    
-    # Record initial weight norms ONLY on first call — never update after that
-    if not INITIAL_WEIGHT_NORMS:
-        with torch.no_grad():
-            for layer in hparams.layers:
-                w_name = f"{hparams.rewrite_module_tmp.format(layer)}.weight"
-                INITIAL_WEIGHT_NORMS[w_name] = torch.linalg.norm(
-                    nethook.get_parameter(model, w_name).float()
-                ).item()
-        print(f"Recorded initial weight norms: { {k: f'{v:.2f}' for k, v in INITIAL_WEIGHT_NORMS.items()} }")
 
     deltas = execute_AlphaEdit(model, tok, requests, hparams, cache_template=cache_template)
 
@@ -102,22 +90,9 @@ def apply_AlphaEdit_to_model(
 
             if return_orig_weights and w_name not in weights_copy:
                 weights_copy[w_name] = w.detach().clone()
-            # Clamp using FIXED initial norm — never changes across batches
-            init_norm = INITIAL_WEIGHT_NORMS[w_name]
-            max_upd_norm = init_norm * hparams.clamp_norm_factor
-            upd_norm = torch.linalg.norm(upd_matrix)
-            if upd_norm > max_upd_norm:
-                upd_matrix = upd_matrix * (max_upd_norm / upd_norm)
-                print(f"Clamped upd_matrix norm from {upd_norm:.2f} to {max_upd_norm:.2f}")
             w[...] += upd_matrix.float()
             # Guard against inf/nan from accumulated edits
             w[...] = torch.nan_to_num(w, nan=0.0, posinf=1e4, neginf=-1e4)
-            # Clamp total weight norm to prevent unbounded growth under sequential editing
-            current_norm = torch.linalg.norm(w.float()).item()
-            max_weight_norm = init_norm * (1 + hparams.clamp_norm_factor)
-            if current_norm > max_weight_norm:
-                w[...] = w * (max_weight_norm / current_norm)
-                print(f"Clamped weight norm from {current_norm:.2f} to {max_weight_norm:.2f}")
 
     print(f"New weights successfully inserted into {list(deltas.keys())}")
 
@@ -240,10 +215,19 @@ def execute_AlphaEdit(
         repeat_factor = (layer_ks.size(1) // targets.size(1))
         targets = targets.repeat_interleave(repeat_factor, dim=1)
         resid = targets / (len(hparams.layers) - i)  # Distribute residual across layers
-        upd_matrix = torch.linalg.solve(
-            P[i,:,:].to(f"cuda:{hparams.device}").float() @ (layer_ks.to(f"cuda:{hparams.device}").float() @ layer_ks.T.to(f"cuda:{hparams.device}").float() + cache_c[i,:,:].to(f"cuda:{hparams.device}").float()) + hparams.L2*torch.eye(layer_ks.shape[0], dtype=torch.float,device=f"cuda:{hparams.device}"),
-            P[i,:,:].to(f"cuda:{hparams.device}").float() @ layer_ks.to(f"cuda:{hparams.device}").float() @ resid.T.to(f"cuda:{hparams.device}").float()
+        layer_device = weights[f"{hparams.rewrite_module_tmp.format(layer)}.weight"].device
+        proj = P[i].to(device=layer_device, dtype=torch.float)
+        layer_ks = layer_ks.to(device=layer_device, dtype=torch.float)
+        resid = resid.to(device=layer_device, dtype=torch.float)
+        c = cache_c[i].to(device=layer_device, dtype=torch.float)
+        lhs = (
+            proj @ (layer_ks @ layer_ks.T + c)
+            + hparams.L2 * torch.eye(layer_ks.shape[0], dtype=torch.float, device=layer_device)
         )
+        rhs = (
+            proj @ layer_ks @ resid.T
+        )
+        upd_matrix = torch.linalg.solve(lhs, rhs)
 
         # Adjust update matrix shape
         weight_name = f"{hparams.rewrite_module_tmp.format(layer)}.weight"
@@ -268,13 +252,7 @@ def execute_AlphaEdit(
     
     for i, layer in enumerate(hparams.layers):
         layer_ks = compute_ks(model, tok, requests, hparams, layer, context_templates).T
-        cache_c[i,:,:] += layer_ks.cpu() @ layer_ks.cpu().T
-        # Clamp cache_c to prevent numerical overflow from accumulation
-        cache_c[i,:,:] = torch.clamp(cache_c[i,:,:], min=-1e6, max=1e6)
-        del layer_ks
-    import gc
-    gc.collect()
-    torch.cuda.empty_cache()
+        cache_c[i] += layer_ks @ layer_ks.T
 
     # Restore state of original model
     with torch.no_grad():
@@ -292,6 +270,7 @@ def get_cov(
     layer_name: str,
     mom2_dataset: str,
     mom2_n_samples: str,
+    mom2_batch_tokens: int,
     mom2_dtype: str,
     inv: bool = False,
     force_recompute: bool = False,
@@ -315,6 +294,7 @@ def get_cov(
             mom2_dataset,
             to_collect=["mom2"],
             sample_size=mom2_n_samples,
+            batch_tokens=mom2_batch_tokens,
             precision=mom2_dtype,
             hparams=hparams,
             force_recompute=force_recompute,
@@ -374,6 +354,7 @@ def get_project(model, tok, layer, hparams):
         hparams.mom2_n_samples
         if not force_recompute
         else hparams.mom2_n_samples // 10,
+        hparams.mom2_batch_tokens,
         hparams.mom2_dtype,
         force_recompute=force_recompute,
         hparams=hparams
