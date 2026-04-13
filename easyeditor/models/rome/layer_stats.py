@@ -161,7 +161,7 @@ def layer_stats(
             npos = 4096
 
     if batch_tokens is None:
-        batch_tokens = 1024  # Sort and divide into batches with this many tokens
+        batch_tokens = npos * 3  # Sort and divide into batches with this many tokens
     if precision is None:
         precision = "float64"
     dtype = getattr(torch, precision)
