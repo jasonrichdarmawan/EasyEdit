@@ -79,7 +79,7 @@ def apply_AlphaEdit_to_model(
         cache_c = [torch.zeros(cache_c_shape, device=W_out.device) for _ in hparams.layers]
         del W_out
         cache_c_new = True
-    
+
     deltas = execute_AlphaEdit(model, tok, requests, hparams, cache_template=cache_template)
 
     with torch.no_grad():
