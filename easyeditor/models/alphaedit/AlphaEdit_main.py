@@ -91,8 +91,6 @@ def apply_AlphaEdit_to_model(
             if return_orig_weights and w_name not in weights_copy:
                 weights_copy[w_name] = w.detach().clone()
             w[...] += upd_matrix.float()
-            # Guard against inf/nan from accumulated edits
-            w[...] = torch.nan_to_num(w, nan=0.0, posinf=1e4, neginf=-1e4)
 
     print(f"New weights successfully inserted into {list(deltas.keys())}")
 
