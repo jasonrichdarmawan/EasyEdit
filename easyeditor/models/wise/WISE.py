@@ -336,7 +336,7 @@ class WISE(torch.nn.Module):
             raise FileNotFoundError(f"Checkpoint file not found: {load_path}")
 
         # Load all previously saved information
-        saved_data = torch.load(load_path)
+        saved_data = torch.load(load_path, weights_only=False)
         if hasattr(self.model.config, 'hidden_act'):
             saved_data['config'].hidden_act = self.model.config.hidden_act
         elif hasattr(self.model.config, 'activation_function'):
