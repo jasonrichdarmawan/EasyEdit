@@ -235,7 +235,7 @@ class WISE(torch.nn.Module):
         else:
             k = 1
         bs = tokens["input_ids"].shape[0] - k
-        logits = self.model(**tokens).logits
+        logits = self.model(input_ids=tokens["input_ids"], attention_mask=tokens["attention_mask"]).logits
         shift_logits = logits[:-k, :-1, :].contiguous()
         shift_labels = tokens['labels'][:-k, 1:].contiguous()
 
