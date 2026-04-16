@@ -38,7 +38,7 @@ def main():
     def aa(*args, **kwargs):
         parser.add_argument(*args, **kwargs)
 
-    aa("--model_name", default="gpt2-xl", choices=["gpt2-xl", "EleutherAI/gpt-j-6B", "Qwen/Qwen3-4B-Instruct-2507"])
+    aa("--model_name", default="gpt2-xl", choices=["gpt2-xl", "EleutherAI/gpt-j-6B", "Qwen/Qwen3-4B-Instruct-2507", "CohereLabs/tiny-aya-global"])
     aa("--apply_chat_template", action="store_true")
     aa("--dataset", default="wikipedia", choices=["wikitext", "wikipedia"])
     aa("--layers", default=[17], type=lambda x: list(map(int, x.split(","))))
