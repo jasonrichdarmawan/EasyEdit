@@ -1057,11 +1057,27 @@ def get_llama_like_components(model, layer_idx):
         "mlp_in": layer.mlp, # Use full MLP block to capture gradients from both Gate and Up paths
         "mlp_out": layer.mlp.down_proj,
     }, embed
+    
+def get_tiny_aya_like_components(model, layer_idx):
+    layer = model.model.layers[layer_idx]
+    embed = model.model.embed_tokens
+    return {
+        "layer_block": layer,
+        "ln_1": layer.input_layernorm, # Component responsible for Norm before Attention
+        "q": layer.self_attn.q_proj,
+        "k": layer.self_attn.k_proj,
+        "v": layer.self_attn.v_proj,
+        "o": layer.self_attn.o_proj,
+        "ln_2": None,
+        "mlp_in": layer.mlp, # Use full MLP block to capture gradients from both Gate and Up paths
+        "mlp_out": layer.mlp.down_proj,
+    }, embed
 
 COMPONENT_REGISTRY = {
     "GPT2LMHeadModel": get_gpt2_components,
     "LlamaForCausalLM": get_llama_like_components,
     "Qwen3ForCausalLM": get_llama_like_components,
+    "Cohere2ForCausalLM": get_tiny_aya_like_components,
 }
 
 def get_gpt2_config(model):
@@ -1094,6 +1110,7 @@ CONFIG_REGISTRY = {
     "GPT2LMHeadModel": get_gpt2_config,
     "LlamaForCausalLM": get_llama_like_config,
     "Qwen3ForCausalLM": get_llama_like_config,
+    "Cohere2ForCausalLM": get_llama_like_config,
 }
 
 # --- Metric Factories ---
@@ -1233,7 +1250,7 @@ class EAPGraph:
 
     def _norm_vjp(self, norm_key: str, grad_out: torch.Tensor):
         if norm_key not in self.norm_io:
-            raise KeyError(f"Missing normalization cache for {norm_key}")
+            return grad_out
 
         norm_input = self.norm_io[norm_key]["input"]
         norm_output = self.norm_io[norm_key]["output"]
