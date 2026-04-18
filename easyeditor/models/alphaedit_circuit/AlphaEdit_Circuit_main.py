@@ -92,8 +92,8 @@ def apply_AlphaEdit_Circuit_to_model(
 
     with torch.no_grad():
         for w_name, upd_m in deltas.items():
-            upd_matrix = upd_m.to(f"cuda:{hparams.device}")
             w = nethook.get_parameter(model, w_name)
+            upd_matrix = upd_m.to(w.device)
             upd_matrix = upd_matrix_match_shape(upd_matrix, w.shape)
 
             if return_orig_weights and w_name not in weights_copy:
