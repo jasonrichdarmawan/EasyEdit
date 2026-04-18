@@ -1103,6 +1103,21 @@ def get_llama_like_config(model):
         "n_kv_heads": config.num_key_value_heads,
         "hidden_size": config.hidden_size,
         "head_dim": config.head_dim,
+        "parallel_attn_mlp": False,
+    }
+    return c
+
+def get_tiny_aya_like_config(model):
+    config = model.config
+    c = {
+        "is_qkv_fused": False,
+        "is_qkv_conv1d": False,
+        "n_layers": config.num_hidden_layers,
+        "n_heads": config.num_attention_heads,
+        "n_kv_heads": config.num_key_value_heads,
+        "hidden_size": config.hidden_size,
+        "head_dim": config.head_dim,
+        "parallel_attn_mlp": True,
     }
     return c
 
@@ -1110,7 +1125,7 @@ CONFIG_REGISTRY = {
     "GPT2LMHeadModel": get_gpt2_config,
     "LlamaForCausalLM": get_llama_like_config,
     "Qwen3ForCausalLM": get_llama_like_config,
-    "Cohere2ForCausalLM": get_llama_like_config,
+    "Cohere2ForCausalLM": get_tiny_aya_like_config,
 }
 
 # --- Metric Factories ---
@@ -1249,9 +1264,17 @@ class EAPGraph:
         self.norm_io = {}
 
     def _norm_vjp(self, norm_key: str, grad_out: torch.Tensor):
+        if self.config["parallel_attn_mlp"]:
+            if norm_key.endswith("ln_1"):
+                pass
+            elif norm_key.endswith("ln_2"):
+                norm_key = norm_key.replace("ln_2", "ln_1")
+            else:
+                raise ValueError(f"Unexpected norm key '{norm_key}' for parallel_attn_mlp config.")
+            
         if norm_key not in self.norm_io:
-            return grad_out
-
+            raise ValueError(f"Norm key '{norm_key}' not found. Check your hook registrations and naming conventions.")
+        
         norm_input = self.norm_io[norm_key]["input"]
         norm_output = self.norm_io[norm_key]["output"]
 
@@ -1508,6 +1531,11 @@ class EAPGraph:
         return_per_head_attribution: bool = False,
         profile = False,
     ):
+        """
+        Caveat: If corrupted_input_ids and corrupted_attention_mask is None, then we will use a noise baseline approach where we add noise to the subject token embedding in the clean prompt as the corrupted forward pass.
+        However, this approach may not be effective for Transformer variants which use centering LayerNorm (e.g. CohereLabs/tiny-aya-global).
+        Alternatively, corrupted_input_ids can be constructed by shifting subject token positions by 1.
+        """
         stage = "prepare_activations"
         phase_start = self.profiler.begin(profile, reset_peak=True)
     
@@ -1848,6 +1876,9 @@ class EAPGraph:
                         score_tensor = score_tensor.sum(dim=(0, 1))
                     scores[dest_name] = score_tensor.detach()
 
+                # Save the source view before adding attention output for parallel architectures
+                src_view_before_attn = src_buffer[:, :, :curr_src_idx, :]
+
                 # 3. Source: Attention Output
                 res_name = f"blocks.{layer}.attn.hook_result"
                 if res_name not in activation_differences:
@@ -1867,7 +1898,11 @@ class EAPGraph:
                     curr_src_idx += n_new
 
                 # 4. MLP Attribution: Score S -> MLP
-                src_view = src_buffer[:, :, :curr_src_idx, :]
+                if self.config["parallel_attn_mlp"]:
+                    src_view = src_view_before_attn
+                else:
+                    src_view = src_buffer[:, :, :curr_src_idx, :]
+                
                 mlp_dest_name = f"blocks.{layer}.hook_mlp_in"
                 if mlp_dest_name not in clean_grads:
                     raise ValueError(f"Missing required gradient for {mlp_dest_name} to compute MLP scores. Check if backward hooks are registered correctly and gradients are being captured.")
@@ -1911,7 +1946,7 @@ class EAPGraph:
 if __name__ == "__main__":
     import os
     
-    os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     # Solve out-of-memory issues by allowing PyTorch to split large allocations into smaller segments that can be freed independently.
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     
@@ -1925,7 +1960,8 @@ if __name__ == "__main__":
     
     # model_id = "gpt2"
     # model_id = "meta-llama/Meta-Llama-3-8B"
-    model_id = "Qwen/Qwen3-4B-Instruct-2507"
+    # model_id = "Qwen/Qwen3-4B-Instruct-2507"
+    model_id = "CohereLabs/tiny-aya-global"
     
     logger.info(f"Loading {model_id}...")
     
@@ -1947,7 +1983,7 @@ if __name__ == "__main__":
          'You will be given a question with five answer choices (. {prompt}',],
     ]
     prompts = [
-        ("Suppose Albert Einstein lives on a houseboat, Ellie Kemper lives in an apartment, and Elvis Presley lives in a cabin. Therefore, the person living in the apartment is a citizen of", "Ellie Kemper"),
+        ("Suppose Albert Einstein lives on a houseboat, Terry Fox lives in an apartment, and Elvis Presley lives in a cabin. Therefore, the person living in the apartment is a citizen of", "Terry Fox"),
     ]
     clean_prompts = []
     subjects = []
@@ -1958,7 +1994,7 @@ if __name__ == "__main__":
                 subjects.append(prompt[1])
 
     prompts = [
-        ("Suppose Albert Einstein lives on a houseboat, Cillian Murphy lives in an apartment, and Elvis Presley lives in a cabin. Therefore, the person living in the apartment is a citizen of", "Cillian Murphy"),
+        ("Suppose Albert Einstein lives on a houseboat, Angle Merkel lives in an apartment, and Elvis Presley lives in a cabin. Therefore, the person living in the apartment is a citizen of", "Angela Merkel"),
     ]
     corrupted_prompts = []
     for prompt in prompts:
@@ -1992,7 +2028,7 @@ if __name__ == "__main__":
 
 if __name__ == "__main__":
     profile = True
-    use_subject_noise_baseline = True
+    use_subject_noise_baseline = False
     return_per_head_attribution = False
     return_per_token_scores = True
 
@@ -2011,17 +2047,42 @@ if __name__ == "__main__":
     metric_fn = get_kl_div_metric()
     
     if not use_subject_noise_baseline:
-        corrupted_formatted_prompts = format_prompt(tokenizer, corrupted_prompts, apply_chat_template=chat_format)
-        corrupted, _ = encode_prompt(tokenizer, corrupted_formatted_prompts)
-        corrupted_input_ids = corrupted["input_ids"]
-        corrupted_attention_mask = corrupted["attention_mask"]
+        corrupted_input_ids = input_ids.clone()
+        corrupted_attention_mask = attention_mask.clone()
+        for subject_span in subject_spans:
+            start, end = subject_span
+            corrupted_input_ids[:, start:end + 1] += 1
+        # corrupted_formatted_prompts = format_prompt(tokenizer, corrupted_prompts, apply_chat_template=chat_format)
+        # corrupted, _ = encode_prompt(tokenizer, corrupted_formatted_prompts)
+        # corrupted_input_ids = corrupted["input_ids"]
+        # corrupted_attention_mask = corrupted["attention_mask"]
+        # logger.info(f"Corrupted prompts:\n{corrupted_formatted_prompts[0]}")
         
-        logger.info(f"Corrupted prompts:\n{corrupted_formatted_prompts[0]}")
-        
-        results = eap.attribute(input_ids, attention_mask, metric_fn, corrupted_input_ids=corrupted_input_ids, corrupted_attention_mask=corrupted_attention_mask, integrated_gradients=5, return_per_head_attribution=return_per_head_attribution, return_per_token_scores=return_per_token_scores, profile=profile)
+        results = eap.attribute(
+            input_ids=input_ids, 
+            attention_mask=attention_mask, 
+            metric_fc=metric_fn, 
+            corrupted_input_ids=corrupted_input_ids,
+            corrupted_attention_mask=corrupted_attention_mask, 
+            integrated_gradients=5, 
+            return_per_head_attribution=return_per_head_attribution, 
+            return_per_token_scores=return_per_token_scores, 
+            profile=profile,
+        )
     elif use_subject_noise_baseline:
         logger.info("Using subject noise baseline...")
-        results = eap.attribute(input_ids, attention_mask, metric_fn, corrupted_input_ids=None, corrupted_attention_mask=None, subject_spans=subject_spans, integrated_gradients=5, return_per_head_attribution=return_per_head_attribution, return_per_token_scores=return_per_token_scores, profile=profile)
+        results = eap.attribute(
+            input_ids=input_ids, 
+            attention_mask=attention_mask, 
+            metric_fn=metric_fn, 
+            corrupted_input_ids=None, 
+            corrupted_attention_mask=None, 
+            subject_spans=subject_spans, 
+            integrated_gradients=5, 
+            return_per_head_attribution=return_per_head_attribution, 
+            return_per_token_scores=return_per_token_scores, 
+            profile=profile,
+        )
 
 # %% 
 # Structured analysis outputs for downstream fine-tuning decisions
@@ -2041,6 +2102,8 @@ if __name__ == "__main__":
 # %% 
 
 if __name__ == "__main__":
+    if profile:
+        profiler.reset_header()
     if return_per_token_scores:
         sample_start = profiler.begin(enabled=profile, reset_peak=True)
         top_mlp_hubs_by_sample = find_top_mlp_hubs_by_sample(results, topk_hubs=5, topk_sources=5)
@@ -2050,6 +2113,8 @@ if __name__ == "__main__":
 # %%
 
 if __name__ == "__main__":
+    if profile:
+        profiler.reset_header()
     if return_per_token_scores:
         token_sample_start = profiler.begin(enabled=profile, reset_peak=True)
         top_mlp_hubs_by_token_sample = find_top_mlp_hubs_by_token_sample(results, topk_hubs=5, topk_sources=5)
@@ -2059,8 +2124,8 @@ if __name__ == "__main__":
  # %%
  
 if __name__ == "__main__":
-    input_index = 0
-    start = 27
+    input_index = 1
+    start = 38
     input_index_length = clean["attention_mask"][input_index].sum()
     logger.info(f"Input index: {input_index}")
     logger.info(f"Input prompt:\n{tokenizer.decode(clean['input_ids'][input_index][:input_index_length], skip_special_tokens=False)}")
@@ -2080,6 +2145,9 @@ if __name__ == "__main__":
 # %%
 
 if __name__ == "__main__":
+    if profile:
+        profiler.reset_header()
+        
     if return_per_token_scores:
         sample_start = profiler.begin(enabled=profile, reset_peak=True)
         top_hubs_by_sample = find_top_hubs_by_sample(results, topk_hubs=5, topk_sources=5)
@@ -2089,6 +2157,9 @@ if __name__ == "__main__":
 # %%
 
 if __name__ == "__main__":
+    if profile:
+        profiler.reset_header()
+        
     if return_per_token_scores:
         token_sample_start = profiler.begin(enabled=profile, reset_peak=True)
         top_hubs_by_token_sample = find_top_hubs_by_token_sample(results, topk_hubs=5, topk_sources=5)
@@ -2109,6 +2180,8 @@ if __name__ == "__main__":
 # %%
 
 if __name__ == "__main__":
+    if profile:
+        profiler.reset_header()
     if return_per_token_scores:
         sample_start = profiler.begin(enabled=profile, reset_peak=True)
         top_edges_by_sample = find_top_edges_by_sample(results, topk_edges=3)
