@@ -184,11 +184,14 @@ def execute_AlphaEdit_Circuit(
             subject_spans.append((start_tok, end_tok))
         print(f"Subject spans: {subject_spans}")
         
-        corrupted_input_ids = eap_tok["input_ids"].clone()
-        corrupted_attention_mask = eap_tok["attention_mask"].clone()
-        for subject_span in subject_spans:
-            start, end = subject_span
-            corrupted_input_ids[:, start:end+1] +=1
+        corrupted_input_ids = None
+        corrupted_attention_mask = None
+        if not hparams.use_subject_noise_baseline:
+            corrupted_input_ids = eap_tok["input_ids"].clone()
+            corrupted_attention_mask = eap_tok["attention_mask"].clone()
+            for subject_span in subject_spans:
+                start, end = subject_span
+                corrupted_input_ids[:, start:end+1] +=1
         
         metric_fn = get_kl_div_metric()
         scores = eap.attribute(

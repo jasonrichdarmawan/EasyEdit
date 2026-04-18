@@ -9,7 +9,6 @@ import yaml
 class AlphaEditCircuitHyperParams(HyperParams):
     # Method
     num_hidden_layers: int
-    layers: List[int]
     layer_selection: Literal["all", "random"]
     fact_token: Literal[
         "last", "subject_first", "subject_last", "subject_first_after_last"
@@ -38,7 +37,6 @@ class AlphaEditCircuitHyperParams(HyperParams):
     nullspace_threshold: float
     L2: float
     alg_name: str
-    device: int
     model_name: str
     edit_with_chat_template: bool
     stats_dir: str
@@ -54,6 +52,8 @@ class AlphaEditCircuitHyperParams(HyperParams):
     batch_size: int = 1
     model_parallel: bool = False
     mom2_batch_tokens: int = None
+    
+    use_subject_noise_baseline: bool = False
 
     @classmethod
     def from_hparams(cls, hparams_name_or_path: str):
