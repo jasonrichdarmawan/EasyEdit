@@ -37,4 +37,4 @@ hook_v_input: "model.layers.{}.self_attn.v_proj"
 hook_mlp_in: "model.layers.{}.mlp"
 hook_resid_post: "model.layers.{}"
 
-use_subject_noise_baseline: False
+use_subject_noise_baseline: True

@@ -115,10 +115,6 @@ def execute_AlphaEdit_Circuit(
     hparams: AlphaEditCircuitHyperParams,
     cache_template: Optional[str] = None,
 ) -> Dict[str, Tuple[torch.Tensor]]:
-    """
-    Executes the AlphaEdit update algorithm for the specified update at the specified layer
-    Invariant: model at beginning of function == model at end of function
-    """
 
     deltas = {}
 
@@ -187,12 +183,14 @@ def execute_AlphaEdit_Circuit(
         corrupted_input_ids = None
         corrupted_attention_mask = None
         if not hparams.use_subject_noise_baseline:
+            print("Using clean baseline for EAP attribution.")
             corrupted_input_ids = eap_tok["input_ids"].clone()
             corrupted_attention_mask = eap_tok["attention_mask"].clone()
-            for subject_span in subject_spans:
+            for sample_idx, subject_span in enumerate(subject_spans):
                 start, end = subject_span
-                corrupted_input_ids[:, start:end+1] +=1
-        
+                corrupted_input_ids[sample_idx, start:end+1] +=1
+        else:
+            print("Using subject noise baseline for EAP attribution.")
         metric_fn = get_kl_div_metric()
         scores = eap.attribute(
             input_ids=eap_tok["input_ids"], 

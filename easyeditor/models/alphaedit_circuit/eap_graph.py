@@ -1576,7 +1576,7 @@ class EAPGraph:
         h = embed.register_forward_hook(stat_hook)
         self.register_forward_hooks(return_per_head_attribution=return_per_head_attribution)
         with torch.no_grad():
-            clean_logits = self.model(input_ids, use_cache=False).logits
+            clean_logits = self.model(input_ids, attention_mask=attention_mask, use_cache=False).logits
             clean_acts = self.activations.copy()
         self.reset_hooks()
         h.remove()
@@ -1587,7 +1587,7 @@ class EAPGraph:
             h = embed.register_forward_hook(stat_hook)
             self.register_forward_hooks(return_per_head_attribution=return_per_head_attribution)
             with torch.no_grad():
-                corrupted_logits = self.model(corrupted_input_ids, use_cache=False).logits
+                corrupted_logits = self.model(corrupted_input_ids, attention_mask=corrupted_attention_mask, use_cache=False).logits
                 corrupt_acts = self.activations.copy()
             h.remove()
             self.reset_hooks()
@@ -1598,10 +1598,12 @@ class EAPGraph:
             for i, (start, end) in enumerate(subject_spans):
                 subject_tokens.append(clean_wte[i, start:end + 1]) # shape [Subject_Tokens, D_model]
             subject_tokens = torch.cat(subject_tokens, dim=0) # [Total_Subject_Tokens, D_model]
-            std = subject_tokens.std().item()
+            feature_std = subject_tokens.std(dim=0, unbiased=False).clamp_min(1e-6)
             corrupted_wte = clean_wte.detach().clone()
             for i, (start, end) in enumerate(subject_spans):
-                corrupted_wte[i, start:end + 1] += std
+                token_slice = corrupted_wte[i, start:end + 1]
+                token_noise = torch.randn_like(token_slice) * feature_std.unsqueeze(0)
+                corrupted_wte[i, start:end + 1] = token_slice + token_noise
 
             def noisy_embed_hook(module, input, output):
                 return corrupted_wte
@@ -1609,7 +1611,7 @@ class EAPGraph:
             h = embed.register_forward_hook(noisy_embed_hook)
             self.register_forward_hooks(return_per_head_attribution=return_per_head_attribution)
             with torch.no_grad():
-                corrupted_logits = self.model(input_ids, use_cache=False).logits
+                corrupted_logits = self.model(input_ids, attention_mask=attention_mask, use_cache=False).logits
                 corrupt_acts = self.activations.copy()
             h.remove()
             self.reset_hooks()
@@ -1644,7 +1646,7 @@ class EAPGraph:
             "activation_differences": activation_differences,
         }
 
-    def _compute_gradients(self, input_ids, input_length, clean_wte, corrupted_wte, metric_fn: Callable, reference_logits, steps: int, return_per_head_attribution: bool = False, profile = False):
+    def _compute_gradients(self, input_ids, attention_mask, input_length, clean_wte, corrupted_wte, metric_fn: Callable, reference_logits, steps: int, return_per_head_attribution: bool = False, profile = False):
         phase_start = self.profiler.begin(profile, reset_peak=True)
         
         _, embed = self._get_layer_components(0)
@@ -1665,7 +1667,7 @@ class EAPGraph:
             h_interp = embed.register_forward_hook(interpolation_hook)
 
             fwd_start = self.profiler.begin(profile, reset_peak=False)
-            logits = self.model(input_ids, use_cache=False).logits
+            logits = self.model(input_ids, attention_mask=attention_mask, use_cache=False).logits
             loss = metric_fn(logits, reference_logits, input_length)
             self.profiler.end(profile, fwd_start, f"{step_tag}.forward_loss", report_peak=False)
 
@@ -1713,6 +1715,7 @@ class EAPGraph:
         )
         gradients = self._compute_gradients(
             prepared["input_ids"],
+            prepared["attention_mask"],
             prepared["input_length"],
             prepared["clean_wte"],
             prepared["corrupted_wte"],
@@ -1750,6 +1753,7 @@ class EAPGraph:
         )
         gradients = self._compute_gradients(
             prepared["input_ids"],
+            prepared["attention_mask"],
             prepared["input_length"],
             prepared["clean_wte"],
             prepared["corrupted_wte"],
@@ -2028,7 +2032,7 @@ if __name__ == "__main__":
 
 if __name__ == "__main__":
     profile = True
-    use_subject_noise_baseline = False
+    use_subject_noise_baseline = True
     return_per_head_attribution = False
     return_per_token_scores = True
 
@@ -2049,9 +2053,9 @@ if __name__ == "__main__":
     if not use_subject_noise_baseline:
         corrupted_input_ids = input_ids.clone()
         corrupted_attention_mask = attention_mask.clone()
-        for subject_span in subject_spans:
+        for sample_idx, subject_span in enumerate(subject_spans):
             start, end = subject_span
-            corrupted_input_ids[:, start:end + 1] += 1
+            corrupted_input_ids[sample_idx, start:end + 1] += 1
         # corrupted_formatted_prompts = format_prompt(tokenizer, corrupted_prompts, apply_chat_template=chat_format)
         # corrupted, _ = encode_prompt(tokenizer, corrupted_formatted_prompts)
         # corrupted_input_ids = corrupted["input_ids"]
@@ -2061,7 +2065,7 @@ if __name__ == "__main__":
         results = eap.attribute(
             input_ids=input_ids, 
             attention_mask=attention_mask, 
-            metric_fc=metric_fn, 
+            metric_fn=metric_fn, 
             corrupted_input_ids=corrupted_input_ids,
             corrupted_attention_mask=corrupted_attention_mask, 
             integrated_gradients=5, 
@@ -2124,8 +2128,8 @@ if __name__ == "__main__":
  # %%
  
 if __name__ == "__main__":
-    input_index = 1
-    start = 38
+    input_index = 4
+    start = 50
     input_index_length = clean["attention_mask"][input_index].sum()
     logger.info(f"Input index: {input_index}")
     logger.info(f"Input prompt:\n{tokenizer.decode(clean['input_ids'][input_index][:input_index_length], skip_special_tokens=False)}")
