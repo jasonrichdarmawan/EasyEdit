@@ -224,25 +224,28 @@ def execute_AlphaEdit_Circuit(
             
             hubs.append(hub)
         
-        sources_skipped = [[] for _ in range(len(hubs))]
-        for hub_idx, hub in enumerate(hubs):
+        for hub in hubs:
+            hub["sources_skipped"] = []
             sources = []
             for source in hub["sources"]:
                 if not source["raw"].endswith("hook_mlp_out"):
-                    sources_skipped[hub_idx].append(source)
+                    hub["sources_skipped"].append(source)
                     continue
                 
                 shallow_layers = list(range(0, int(hparams.num_hidden_layers * 1/8)))
                 deep_layers = list(range(int(hparams.num_hidden_layers * 7/8), hparams.num_hidden_layers))
-                layers_not_to_edit = shallow_layers + deep_layers
+                layers_not_to_edit = (
+                    shallow_layers
+                    + deep_layers
+                )
                 if source["layer"] in layers_not_to_edit:
-                    sources_skipped[hub_idx].append(source)
+                    hub["sources_skipped"].append(source)
                     continue
                 
                 sources.append(source)
             if len(sources[3:]) > 0:
-                sources_skipped[hub_idx].extend(sources[3:])
-            sources = sorted(sources[:3], key=lambda x: x["layer"])
+                hub["sources_skipped"].extend(sources[3:])
+            sources = sources[:3]
             
             if len(sources) == 0:
                 hubs.remove(hub)
@@ -253,11 +256,8 @@ def execute_AlphaEdit_Circuit(
         
         if len(hubs[3:]) > 0:
             hubs_skipped.extend(hubs[3:])
-        hubs = sorted(hubs[:3], key=lambda x: x["destination"]["layer"])
+        hubs = hubs[:3]
         
-        print(f"Hubs:\n{json.dumps(hubs, indent=4)}")
-        if len(hubs_skipped) > 0:
-            print(f"Skipped hubs:\n{json.dumps(hubs_skipped, indent=4)}")
         if len(hubs) == 0:
             print("No significant hubs found for this request. Skipping...")
             print(f"Top MLP hubs by token/sample-level scores:\n{json.dumps(top_mlp_hubs_by_token_sample, indent=4)}")
@@ -267,12 +267,10 @@ def execute_AlphaEdit_Circuit(
         updates_done = 0
             
         # Insert
-        for hub_idx, hub in enumerate(hubs):
+        for hub in sorted(hubs, key=lambda x: x["destination"]["layer"]):
             print(f"Hub:\n{json.dumps(hub, indent=4)}")
-            if len(sources_skipped[hub_idx]) > 0:
-                print(f"Skipped sources for this hub:\n{json.dumps(sources_skipped[hub_idx], indent=4)}")
             
-            for source in hub["sources"]:
+            for source in sorted(hub["sources"], key=lambda x: x["layer"]):
                 z_list = []
                 cur_z = compute_z(
                     model,
