@@ -1598,7 +1598,13 @@ class EAPGraph:
             for i, (start, end) in enumerate(subject_spans):
                 subject_tokens.append(clean_wte[i, start:end + 1]) # shape [Subject_Tokens, D_model]
             subject_tokens = torch.cat(subject_tokens, dim=0) # [Total_Subject_Tokens, D_model]
-            feature_std = subject_tokens.std(dim=0, unbiased=False).clamp_min(1e-6)
+            if subject_tokens.size(0) > 1:
+                feature_std = subject_tokens.std(dim=0)
+            else: 
+                # If only one subject token, use the std of before and after tokens as an estimate
+                start = min(0, start - 1)
+                end = max(clean_wte.size(1), end + 2)
+                feature_std = clean_wte[0, start:end].std(dim=0)
             corrupted_wte = clean_wte.detach().clone()
             for i, (start, end) in enumerate(subject_spans):
                 token_slice = corrupted_wte[i, start:end + 1]
@@ -1980,14 +1986,15 @@ if __name__ == "__main__":
 if __name__ == "__main__":
     context_templates = [
         ['{prompt}'], 
-        ['The following is a single-choice question from a Chinese law. {prompt}', 
-         'Therefore the answer is $ \\boxed{1} $. {prompt}', 
-         'Because the number of children in the country has been decreasing. {prompt}', 
-         'I have several questions about the "Crazy in Love. {prompt}', 
-         'You will be given a question with five answer choices (. {prompt}',],
+        # ['The following is a single-choice question from a Chinese law. {prompt}', 
+        #  'Therefore the answer is $ \\boxed{1} $. {prompt}', 
+        #  'Because the number of children in the country has been decreasing. {prompt}', 
+        #  'I have several questions about the "Crazy in Love. {prompt}', 
+        #  'You will be given a question with five answer choices (. {prompt}',],
     ]
     prompts = [
-        ("Suppose Albert Einstein lives on a houseboat, Terry Fox lives in an apartment, and Elvis Presley lives in a cabin. Therefore, the person living in the apartment is a citizen of", "Terry Fox"),
+        # ("Suppose Albert Einstein lives on a houseboat, Terry Fox lives in an apartment, and Elvis Presley lives in a cabin. Therefore, the person living in the apartment is a citizen of", "Terry Fox"),
+        ("London is located in the continent of", "London")
     ]
     clean_prompts = []
     subjects = []

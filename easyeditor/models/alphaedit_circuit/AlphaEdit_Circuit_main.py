@@ -224,6 +224,7 @@ def execute_AlphaEdit_Circuit(
             
             hubs.append(hub)
         
+        filtered_hubs = []
         for hub in hubs:
             hub["sources_skipped"] = []
             sources = []
@@ -248,11 +249,12 @@ def execute_AlphaEdit_Circuit(
             sources = sources[:3]
             
             if len(sources) == 0:
-                hubs.remove(hub)
                 hubs_skipped.append(hub)
                 continue
             
             hub["sources"] = sources
+            filtered_hubs.append(hub)
+        hubs = filtered_hubs
         
         if len(hubs[3:]) > 0:
             hubs_skipped.extend(hubs[3:])
