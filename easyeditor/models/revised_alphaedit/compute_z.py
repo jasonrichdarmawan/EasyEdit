@@ -1,28 +1,20 @@
-from typing import Dict, List, Optional, Tuple
-
 import numpy as np
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, BatchEncoding
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from ..rome import repr_tools
 from ...util import nethook
 
-from .AlphaEdit_Circuit_hparams import AlphaEditCircuitHyperParams
-from .position_utils import get_lookup_positions_in_target
+from .Revised_AlphaEdit_hparams import Revised_AlphaEditHyperParams
 
 
 def compute_z(
     model: AutoModelForCausalLM,
     tok: AutoTokenizer,
-    request: Dict,
-    hparams: AlphaEditCircuitHyperParams,
+    request: dict,
+    hparams: Revised_AlphaEditHyperParams,
     layer: int,
-    context_templates: List[str],
-    source_enc: Optional[BatchEncoding] = None,
-    source_lookup_idx: Optional[int] = None,
-    rendered_source_prompt: Optional[str] = None,
-    raw_source_prompt: Optional[str] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    context_templates: list[str],
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Computes the value (right) vector for the rank-1 update.
     Runs a simple optimization procedure.
@@ -46,46 +38,20 @@ def compute_z(
         for context in context_types:
             prompt = context.replace("{prompt}", request["prompt"])
             rewriting_prompts.append(prompt)
-    # rewriting_prompts.append(request["prompt"])
     kl_prompts = [f"{request['subject']} is a"]
     
     all_prompts = []
-    if not hparams.edit_with_chat_template:
-        for rewriting_prompt in rewriting_prompts:
-            all_prompts.append(f"{rewriting_prompt} {request['target_new']}")
-        
-        all_prompts.extend(kl_prompts)
-    else:
-        chats = []
-        for rewriting_prompt in rewriting_prompts:
-            chat = [
-                {"role": "system", "content": "Only respond with the answer. Do not include any explanations."},
-                # {"role": "user", "content": "Suppose Jack wears a red shirt, Jill wears a green shirt, and Terry Fox wears a blue shirt. Therefore, the person wearing the blue shirt is a citizen of"},
-                # {"role": "assistant", "content": "Canada"},
-                {"role": "user", "content": rewriting_prompt},
-                {"role": "assistant", "content": request["target_new"]},
-            ]
-            chats.append(chat)
-        prompts = tok.apply_chat_template(chats, add_generation_prompt=False, tokenize=False)
-        prompts = [prompt.strip() for prompt in prompts]
-        all_prompts.extend(prompts)
-        
-        chats = []
-        for kl_prompt in kl_prompts:
-            chat = [
-                {"role": "user", "content": kl_prompt},
-            ]
-            chats.append(chat)
-        prompts = tok.apply_chat_template(chats, add_generation_prompt=True, tokenize=False)
-        prompts = [prompt.strip() for prompt in prompts]
-        all_prompts.extend(prompts)
+    for rewriting_prompt in rewriting_prompts:
+        all_prompts.append(f"{rewriting_prompt} {request['target_new']}")
+    
+    all_prompts.extend(kl_prompts)
 
     tok.padding_side = "right"
     input_tok = tok(
         all_prompts,
         return_tensors="pt",
         padding=True,
-        add_special_tokens=not hparams.edit_with_chat_template,
+        add_special_tokens=True,
     ).to(model.device)
 
     # Compute rewriting targets
@@ -101,30 +67,17 @@ def compute_z(
     
     # Compute indices of the tokens where the fact is looked up
     lookup_idxs = []
-    if (source_enc is not None 
-        and source_lookup_idx is not None
-        and rendered_source_prompt is not None
-        and raw_source_prompt is not None):
-        lookup_idxs = get_lookup_positions_in_target(
-            source_enc=source_enc, 
-            source_lookup_idx=source_lookup_idx, 
-            rendered_source_prompt=rendered_source_prompt,
-            raw_source_prompt=raw_source_prompt,
-            target_enc=input_tok, 
-            rendered_target_prompts=all_prompts[:len(rewriting_prompts)],
-        )
-    else:
-        if hparams.fact_token == "subject_first":
-            for i in range(len(all_prompts)):
-                start_char = all_prompts[i].find(request["subject"])
-                start_tok = input_tok.char_to_token(i, start_char)
-                lookup_idxs.append(start_tok)
-        elif hparams.fact_token == "subject_last":
-            for i in range(len(all_prompts)):
-                start_char = all_prompts[i].find(request["subject"])
-                end_char = start_char + len(request["subject"]) - 1
-                end_tok = input_tok.char_to_token(i, end_char)
-                lookup_idxs.append(end_tok)
+    if hparams.fact_token == "subject_first":
+        for i in range(len(all_prompts)):
+            start_char = all_prompts[i].find(request["subject"])
+            start_tok = input_tok.char_to_token(i, start_char)
+            lookup_idxs.append(start_tok)
+    elif hparams.fact_token == "subject_last":
+        for i in range(len(all_prompts)):
+            start_char = all_prompts[i].find(request["subject"])
+            end_char = start_char + len(request["subject"]) - 1
+            end_tok = input_tok.char_to_token(i, end_char)
+            lookup_idxs.append(end_tok)
     print(f"lookup_idxs: {lookup_idxs}")
     for i, lookup_idx in enumerate(lookup_idxs):
         print(f"Prompt {i}: {tok.decode(input_tok['input_ids'][i][:lookup_idx + 1])}")
@@ -261,85 +214,3 @@ def compute_z(
     )
 
     return target
-
-
-def get_module_input_output_at_words(
-    model: AutoModelForCausalLM,
-    tok: AutoTokenizer,
-    layer: int,
-    context_templates: List[str],
-    words: List[str],
-    module_template: str,
-    fact_token_strategy: str,
-) -> Tuple[torch.Tensor]:
-    """
-    Retrieves detached representations for a word at the input and
-    output of a particular layer module.
-    """
-
-    word_repr_args = dict(
-        model=model,
-        tok=tok,
-        layer=layer,
-        module_template=module_template,
-    )
-    if "subject_" in fact_token_strategy and fact_token_strategy.index("subject_") == 0:
-        context_info = dict(
-            context_templates=context_templates,
-            words=words,
-        )
-        subtoken = fact_token_strategy[len("subject_") :]
-        l_input, l_output = repr_tools.get_reprs_at_word_tokens(
-            track="both", subtoken=subtoken, **context_info, **word_repr_args
-        )
-    elif fact_token_strategy == "last":
-        raise Exception("This is definitely bugged, fix it.")
-        context_info = dict(
-            contexts=[
-                tmp[i].format(words[i]) for i, tmp in enumerate(context_templates)
-            ],
-            idxs=[000000],
-        )
-        l_input, l_output = repr_tools.get_reprs_at_idxs(
-            track="both", **context_info, **word_repr_args
-        )
-    else:
-        raise ValueError(f"fact_token={fact_token_strategy} not recognized")
-
-    return l_input.detach(), l_output.detach()
-
-
-def find_fact_lookup_idx(
-    prompt: str,
-    subject: str,
-    tok: AutoTokenizer,
-    fact_token_strategy: str,
-    verbose=True,
-) -> int:
-    """
-    Computes hypothesized fact lookup index given a sentence and subject.
-    """
-
-    ret = None
-    if fact_token_strategy == "last":
-        ret = -1
-    elif (
-        "subject_" in fact_token_strategy and fact_token_strategy.index("subject_") == 0
-    ):
-        ret = repr_tools.get_words_idxs_in_templates(
-            tok=tok,
-            context_templates=[prompt],
-            words=[subject],
-            subtoken=fact_token_strategy[len("subject_") :],
-        )[0][0]
-    else:
-        raise ValueError(f"fact_token={fact_token_strategy} not recognized")
-
-    sentence = prompt.format(subject)
-    if verbose:
-        print(
-            f"Lookup index found: {ret} | Sentence: {sentence} | Token:",
-            tok.decode(tok(sentence)["input_ids"][ret]),
-        )
-
-    return ret
