@@ -18,6 +18,7 @@ from ..models.r_rome import R_ROMEHyperParams, apply_r_rome_to_model
 from ..models.emmet import EMMETHyperParams, apply_emmet_to_model
 from ..models.alphaedit import AlphaEditHyperParams, apply_AlphaEdit_to_model
 from ..models.alphaedit_circuit import AlphaEditCircuitHyperParams, apply_AlphaEdit_Circuit_to_model
+from ..models.revised_alphaedit import Revised_AlphaEditHyperParams, apply_Revised_AlphaEdit_to_model
 from .. models.deepedit_api import DeepEditApiHyperParams, apply_deepedit_api_to_model
 from ..models.dpo import DPOHyperParams, apply_dpo_to_model
 
@@ -42,6 +43,7 @@ ALG_DICT = {
     "EMMET": apply_emmet_to_model,
     "AlphaEdit": apply_AlphaEdit_to_model,
     "AlphaEdit_Circuit": apply_AlphaEdit_Circuit_to_model,
+    'Revised_AlphaEdit': apply_Revised_AlphaEdit_to_model,
     "DeepEdit-Api": apply_deepedit_api_to_model,
 }
 

@@ -1598,18 +1598,10 @@ class EAPGraph:
             for i, (start, end) in enumerate(subject_spans):
                 subject_tokens.append(clean_wte[i, start:end + 1]) # shape [Subject_Tokens, D_model]
             subject_tokens = torch.cat(subject_tokens, dim=0) # [Total_Subject_Tokens, D_model]
-            if subject_tokens.size(0) > 1:
-                feature_std = subject_tokens.std(dim=0)
-            else: 
-                # If only one subject token, use the std of before and after tokens as an estimate
-                start = min(0, start - 1)
-                end = max(clean_wte.size(1), end + 2)
-                feature_std = clean_wte[0, start:end].std(dim=0)
+            std = subject_tokens.std().item()
             corrupted_wte = clean_wte.detach().clone()
             for i, (start, end) in enumerate(subject_spans):
-                token_slice = corrupted_wte[i, start:end + 1]
-                token_noise = torch.randn_like(token_slice) * feature_std.unsqueeze(0)
-                corrupted_wte[i, start:end + 1] = token_slice + token_noise
+                corrupted_wte[i, start:end + 1] += std
 
             def noisy_embed_hook(module, input, output):
                 return corrupted_wte
