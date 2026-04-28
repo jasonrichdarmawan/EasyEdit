@@ -176,7 +176,6 @@ def layer_stats(
 
     print(f"Computing Cov locally....")
 
-    ds = get_ds()
     
     args = {"sample_size": sample_size}
 
@@ -192,6 +191,11 @@ def layer_stats(
             stat.load_state_dict(cached_state)
         
         stats[ln] = (filename, stat, cached_state is not None)
+        
+    if all(cached for _, _, cached in stats.values()):
+        return stats[layer_name[0]][1] # backward compatibility
+    
+    ds = get_ds()
         
     loader = (
         make_loader(
@@ -243,7 +247,7 @@ def layer_stats(
         if cached:
             continue
         save_cached_state(filename, stat, args)
-    return stat
+    return stats[layer_name[0]][1] # backward compatibility
 
 
 if __name__ == "__main__":
