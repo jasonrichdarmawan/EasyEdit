@@ -17,6 +17,7 @@ from .lora import *
 from .dpo import *
 from .alphaedit import *
 from .alphaedit_circuit import *
+from .revised_alphaedit import *
 from .deco import *
 from .dola import *
 from .deepedit_api import *
