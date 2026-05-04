@@ -25,7 +25,7 @@ ln_f_module: "model.norm"
 lm_head_module: "lm_head"
 mom2_dataset: "wikipedia"
 mom2_n_samples: 100000
-mom2_batch_tokens: None
 mom2_dtype: "float32"
+mom2_batch_tokens: None
 nullspace_threshold: 2e-2
 L2: 1

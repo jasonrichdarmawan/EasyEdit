@@ -344,7 +344,8 @@ def execute_AlphaEdit_Circuit(
                     ) as tr:
                         model(**cur_zs_tok)
                 
-                cur_zs = tr.output[list(range(tr.output.shape[0])), idxs].T # shape [d_model, num_requests]
+                output = tr.output[0] if isinstance(tr.output, tuple) else tr.output
+                cur_zs = output[list(range(output.shape[0])), idxs].T # shape [d_model, num_requests]
                 targets = zs - cur_zs
                 print("z error", torch.linalg.norm(targets, dim=0).mean())
 
@@ -353,19 +354,20 @@ def execute_AlphaEdit_Circuit(
                 resid = targets / (total_source_updates - updates_done)  # Distribute residual across remaining hub/source edits
                 weight_name = f"{hparams.rewrite_module_tmp.format(source['layer'])}.weight"
                 layer_device = weights[weight_name].device
-                proj = P[source["layer"]].to(device=layer_device, dtype=torch.float)
-                layer_ks = layer_ks.to(device=layer_device, dtype=torch.float)
-                resid = resid.to(device=layer_device, dtype=torch.float)
-                c = cache_c[source["layer"]].to(device=layer_device, dtype=torch.float)
+                # Solve on CPU to avoid GPU OOM on large projection matrices
+                proj = P[source["layer"]].to(device="cpu", dtype=torch.float)
+                layer_ks = layer_ks.to(device="cpu", dtype=torch.float)
+                resid = resid.to(device="cpu", dtype=torch.float)
+                c = cache_c[source["layer"]].to(device="cpu", dtype=torch.float)
                 k1k1 = layer_ks @ layer_ks.T
                 lhs = (
                     proj @ (c + k1k1)
-                    + hparams.L2 * torch.eye(layer_ks.shape[0], dtype=torch.float, device=layer_device)
+                    + hparams.L2 * torch.eye(layer_ks.shape[0], dtype=torch.float, device="cpu")
                 )
                 rhs = (
                     proj @ layer_ks @ resid.T
                 )
-                upd_matrix = torch.linalg.solve(lhs, rhs)
+                upd_matrix = torch.linalg.solve(lhs, rhs).to(layer_device)
 
                 # Adjust update matrix shape
                 upd_matrix = upd_matrix_match_shape(upd_matrix, weights[weight_name].shape)
