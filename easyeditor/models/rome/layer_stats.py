@@ -5,6 +5,7 @@ import torch
 from datasets import load_dataset
 from tqdm.auto import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from torch.utils.data import Dataset
 
 from ...util.globals import *
 from ...util.nethook import TraceDict, set_requires_grad
@@ -27,6 +28,26 @@ STAT_TYPES = {
 }
 
 
+class SyntheticTokenDataset(Dataset):
+    """Fixed-length token sequences for testing model memory consumption."""
+
+    def __init__(self, sample_count, sequence_length, token_id):
+        self.sample_count = sample_count
+        self.sequence_length = sequence_length
+        self.token_id = token_id
+
+    def __len__(self):
+        return self.sample_count
+
+    def __getitem__(self, _index):
+        return {
+            "input_ids": torch.full(
+                (self.sequence_length,), self.token_id, dtype=torch.long
+            ),
+            "attention_mask": torch.ones(self.sequence_length, dtype=torch.long),
+        }
+
+
 def main():
     """
     Command-line utility to precompute cached stats.
@@ -38,7 +59,10 @@ def main():
     def aa(*args, **kwargs):
         parser.add_argument(*args, **kwargs)
 
-    aa("--model_name", default="gpt2-xl", choices=["gpt2-xl", "EleutherAI/gpt-j-6B", "Qwen/Qwen3-4B-Instruct-2507", "CohereLabs/tiny-aya-global"])
+    aa("--model_name", default="gpt2-xl", choices=[
+        "gpt2-xl", "EleutherAI/gpt-j-6B", "Qwen/Qwen3-4B-Instruct-2507", "CohereLabs/tiny-aya-global",
+        "CohereLabs/aya-expanse-8b"
+    ])
     aa("--apply_chat_template", action="store_true")
     aa("--dataset", default="wikipedia", choices=["wikitext", "wikipedia"])
     aa("--layers", default=[17], type=lambda x: list(map(int, x.split(","))))
@@ -47,13 +71,26 @@ def main():
     aa("--sample_size", default=100000, type=lambda x: None if x == "all" else int(x))
     aa("--batch_size", default=100, type=int)
     aa("--batch_tokens", default=None, type=lambda x: None if x == "any" else int(x))
+    aa("--fake_samples", default=0, type=int)
+    aa("--fake_sequence_length", default=4096, type=int)
     aa("--precision", default="float32", choices=["float64", "float32", "float16"])
+    aa(
+        "--max_memory",
+        type=lambda value: {
+            int(device): memory
+            for device, memory in (item.split(":", 1) for item in value.split(","))
+        },
+        help='Comma-separated GPU memory limits, e.g. "0:14GiB,1:18GiB".',
+    )
     aa("--stats_dir", default="data/stats", type=str)
     aa("--download", default=1, type=int, choices=[0, 1])
     args = parser.parse_args()
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
-    model = AutoModelForCausalLM.from_pretrained(args.model_name, device_map="auto").eval()
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model_name, device_map="auto",
+        max_memory=args.max_memory if args.max_memory else None,
+    ).eval()
     set_requires_grad(False, model)
 
     print(
@@ -79,7 +116,9 @@ def main():
         batch_tokens=args.batch_tokens,
         download=args.download,
         batch_size=args.batch_size,
-        apply_chat_template=args.apply_chat_template
+        apply_chat_template=args.apply_chat_template,
+        fake_samples=args.fake_samples,
+        fake_sequence_length=args.fake_sequence_length,
     )
 
 
@@ -100,6 +139,8 @@ def layer_stats(
     hparams=None,
     batch_size=100, # Examine this many dataset texts at once
     apply_chat_template=False,
+    fake_samples=0,
+    fake_sequence_length=11000,
 ):
     """
     Function to load or compute cached stats.
@@ -109,6 +150,20 @@ def layer_stats(
         layer_name = [layer_name]
 
     def get_ds():
+        if fake_samples:
+            token_id = tokenizer.bos_token_id
+            if token_id is None:
+                token_id = tokenizer.eos_token_id
+            if token_id is None:
+                token_id = 0
+            print(
+                f"Using {fake_samples} synthetic samples of "
+                f"{fake_sequence_length} tokens each."
+            )
+            return SyntheticTokenDataset(
+                fake_samples, fake_sequence_length, token_id
+            )
+
         # Load_From_File
         # from datasets import Dataset
         # raw_ds = Dataset.from_file('XXX/XXX/wikipedia-train.arrow')
