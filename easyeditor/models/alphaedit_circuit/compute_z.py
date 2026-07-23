@@ -22,7 +22,8 @@ def compute_z(
     source_lookup_idx: Optional[int] = None,
     rendered_source_prompt: Optional[str] = None,
     raw_source_prompt: Optional[str] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    return_statistics: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, dict[str, float]]:
     """
     Computes the value (right) vector for the rank-1 update.
     Runs a simple optimization procedure.
@@ -259,6 +260,19 @@ def compute_z(
     print(
         f"Init norm {target_init.norm()} | Delta norm {delta.norm()} | Target norm {target.norm()}"
     )
+
+    if return_statistics:
+        final_statistics = {
+            "delta_vector_loss": float(loss.detach().cpu()),
+            "nll_loss": float(nll_loss.detach().cpu()),
+            "kl_loss": float(kl_loss.detach().cpu()),
+            "weight_decay": float(weight_decay.detach().cpu()),
+            "optimization_steps": it + 1,
+            "delta_vector_norm": float(delta.norm().detach().cpu()),
+            "target_init_norm": float(target_init.norm().detach().cpu()),
+            "target_norm": float(target.norm().detach().cpu()),
+        }
+        return target, final_statistics
 
     return target
 

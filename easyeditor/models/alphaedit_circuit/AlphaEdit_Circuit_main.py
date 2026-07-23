@@ -63,15 +63,15 @@ def apply_AlphaEdit_Circuit_to_model(
     P_filepath = Path(hparams.stats_dir) / model_name / f"{hparams.mom2_dataset}_stats" / f"null_space_project_{hparams.mom2_dtype}_{size_suffix}.pt"
     if not os.path.exists(P_filepath):
         print(f"The null-space projection matrix P does not exist and now calculate.")
-        P = [None for _ in range(hparams.num_hidden_layers)]
-        for i, layer in tqdm(enumerate(range(hparams.num_hidden_layers)), desc="Computing projection matrix"):
-            P[i] = get_project(model, tok, layer, hparams).to("cpu")
+        P = {}
+        for layer in tqdm(range(hparams.num_hidden_layers), desc="Computing projection matrix"):
+            P[layer] = get_project(model, tok, layer, hparams).to("cpu")
         print("Saving null-space projection matrix P to avoid redundant future computations...")
         torch.save(P, P_filepath)
         P_loaded = True
     elif P_loaded == False:
         P = torch.load(P_filepath)
-        P = [P[i].contiguous() for i in range(len(P))]
+        P = {k: v.contiguous() for k, v in P.items()}
         P_loaded = True
 
     # Maintain the global variable cache_c to avoid redundant computations.
@@ -88,7 +88,19 @@ def apply_AlphaEdit_Circuit_to_model(
         del W_out
         cache_c_new = True
     
-    deltas = execute_AlphaEdit_Circuit(model, tok, requests, hparams, cache_template=cache_template)
+    return_statistics = kwargs.pop("return_statistics", False)
+    execution_result = execute_AlphaEdit_Circuit(
+        model,
+        tok,
+        requests,
+        hparams,
+        cache_template=cache_template,
+        return_statistics=return_statistics,
+    )
+    if return_statistics:
+        deltas, statistics = execution_result
+    else:
+        deltas = execution_result
 
     with torch.no_grad():
         for w_name, upd_m in deltas.items():
@@ -105,6 +117,8 @@ def apply_AlphaEdit_Circuit_to_model(
     else:
         print(f"New weights successfully inserted into {list(deltas.keys())}")
 
+    if return_statistics:
+        return model, weights_copy, statistics
     return model, weights_copy
 
 
@@ -114,9 +128,11 @@ def execute_AlphaEdit_Circuit(
     requests: List[Dict],
     hparams: AlphaEditCircuitHyperParams,
     cache_template: Optional[str] = None,
-) -> Dict[str, Tuple[torch.Tensor]]:
+    return_statistics: bool = False,
+) -> Dict[str, Tuple[torch.Tensor]] | Tuple[Dict[str, Tuple[torch.Tensor]], List[Dict[str, Any]]]:
 
     deltas = {}
+    statistics = []
 
     # Update target and print info
     requests = deepcopy(requests)
@@ -274,7 +290,7 @@ def execute_AlphaEdit_Circuit(
             
             for source in sorted(hub["sources"], key=lambda x: x["layer"]):
                 z_list = []
-                cur_z = compute_z(
+                z_result = compute_z(
                     model,
                     tok,
                     request,
@@ -285,7 +301,12 @@ def execute_AlphaEdit_Circuit(
                     source_lookup_idx=hub["position"],
                     rendered_source_prompt=eap_prompts[0],
                     raw_source_prompt=request["prompt"],
+                    return_statistics=return_statistics,
                 )
+                if return_statistics:
+                    cur_z, target_statistics = z_result
+                else:
+                    cur_z = z_result
                 
                 z_list.append(cur_z)
                 zs = torch.stack(z_list, dim=1) # shape [d_model, num_requests]
@@ -357,7 +378,8 @@ def execute_AlphaEdit_Circuit(
                 
                 cur_zs = tr.output[list(range(tr.output.shape[0])), idxs].T # shape [d_model, num_requests]
                 targets = zs - cur_zs
-                print("z error", torch.linalg.norm(targets, dim=0).mean())
+                z_error = torch.linalg.norm(targets, dim=0).mean()
+                print("z error", z_error)
 
                 repeat_factor = (layer_ks.size(1) // targets.size(1))
                 targets = targets.repeat_interleave(repeat_factor, dim=1)
@@ -381,8 +403,24 @@ def execute_AlphaEdit_Circuit(
                 # Adjust update matrix shape
                 upd_matrix = upd_matrix_match_shape(upd_matrix, weights[weight_name].shape)
 
-                print("orig norm", torch.linalg.norm(weights[weight_name]))
-                print("upd norm", torch.linalg.norm(upd_matrix))
+                original_weight_norm = torch.linalg.norm(weights[weight_name])
+                update_norm = torch.linalg.norm(upd_matrix)
+                print("orig norm", original_weight_norm)
+                print("upd norm", update_norm)
+
+                if return_statistics:
+                    target_statistics.update(
+                        {
+                            "case_id": request.get("case_id"),
+                            "edit_id": request.get("edit_id"),
+                            "edited_layer": source["layer"],
+                            "target_layer": hub["destination"]["layer"],
+                            "z_error": float(z_error.detach().cpu()),
+                            "weight_norm_before_update": float(original_weight_norm.detach().cpu()),
+                            "weight_update_norm": float(update_norm.detach().cpu()),
+                        }
+                    )
+                    statistics.append(target_statistics)
 
                 # Update model weights and record desired changes in `delta` variable
                 with torch.no_grad():
@@ -406,7 +444,9 @@ def execute_AlphaEdit_Circuit(
     with torch.no_grad():
         for k, v in weights.items():
             v[...] = weights_copy[k]
-    
+
+    if return_statistics:
+        return deltas, statistics
     return deltas
 
 

@@ -54,18 +54,15 @@ def apply_AlphaEdit_to_model(
     # Please ensure that you have downloaded "null_space_project.pt" to the easyedit folder beforehand, or get the P by following calculation
     if not os.path.exists(hparams.P_loc):
         print(f"The null-space projection matrix P does not exist and now calculate.")
-        P = [None for _ in hparams.layers]
-        for i, layer in tqdm(enumerate(hparams.layers), desc="Computing projection matrix"):
-            P[i] = get_project(model, tok, layer, hparams)
+        P = {}
+        for layer in tqdm(hparams.layers, desc="Computing projection matrix"):
+            P[layer] = get_project(model, tok, layer, hparams)
         print("Saving null-space projection matrix P to avoid redundant future computations...")
         torch.save(P, hparams.P_loc)
         P_loaded = True
     elif P_loaded == False:
         P = torch.load(hparams.P_loc)
-        if isinstance(P, torch.Tensor):
-            P = [P[i].contiguous() for i in range(P.shape[0])]
-        else:
-            P = [P[i].contiguous() for i in range(len(P))]
+        P = {k: v.contiguous() for k, v in P.items()}
         P_loaded = True
 
     # Maintain the global variable cache_c to avoid redundant computations.
@@ -82,7 +79,19 @@ def apply_AlphaEdit_to_model(
         del W_out
         cache_c_new = True
 
-    deltas = execute_AlphaEdit(model, tok, requests, hparams, cache_template=cache_template)
+    return_statistics = kwargs.pop("return_statistics", False)
+    execution_result = execute_AlphaEdit(
+        model,
+        tok,
+        requests,
+        hparams,
+        cache_template=cache_template,
+        return_statistics=return_statistics,
+    )
+    if return_statistics:
+        deltas, statistics = execution_result
+    else:
+        deltas = execution_result
 
     with torch.no_grad():
         for w_name, upd_m in deltas.items():
@@ -96,6 +105,8 @@ def apply_AlphaEdit_to_model(
 
     print(f"New weights successfully inserted into {list(deltas.keys())}")
 
+    if return_statistics:
+        return model, weights_copy, statistics
     return model, weights_copy
 
 
@@ -105,13 +116,15 @@ def execute_AlphaEdit(
     requests: List[Dict],
     hparams: AlphaEditHyperParams,
     cache_template: Optional[str] = None,
-) -> Dict[str, Tuple[torch.Tensor]]:
+    return_statistics: bool = False,
+) -> Dict[str, Tuple[torch.Tensor]] | Tuple[Dict[str, Tuple[torch.Tensor]], List[Dict[str, Any]]]:
     """
     Executes the AlphaEdit update algorithm for the specified update at the specified layer
     Invariant: model at beginning of function == model at end of function
     """
 
     deltas = {}
+    statistics = []
 
     # Update target and print info
     requests = deepcopy(requests)
@@ -144,6 +157,8 @@ def execute_AlphaEdit(
     z_layer = hparams.layers[-1]
     z_list = []
 
+    temp_statistics = {}
+
     for request in requests:
         # Retrieve k/v pair if already stored in cache
         cache_fname = (
@@ -169,14 +184,27 @@ def execute_AlphaEdit(
 
         # Compute k/v pair if not loaded from cache
         if not data_loaded:
-            cur_z = compute_z(
+            z_result = compute_z(
                 model,
                 tok,
                 request,
                 hparams,
                 z_layer,
                 context_templates,
+                return_statistics=return_statistics,
             )
+            if return_statistics:
+                cur_z, target_statistics = z_result
+                target_statistics.update(
+                    {
+                        "case_id": request.get("case_id"),
+                        "edit_id": request.get("edit_id"),
+                        "target_layer": z_layer,
+                    }
+                )
+                temp_statistics[request.get("edit_id")] = target_statistics
+            else:
+                cur_z = z_result
 
             z_list.append(cur_z)
 
@@ -210,13 +238,14 @@ def execute_AlphaEdit(
             fact_token_strategy=hparams.fact_token,
         )[1].T
         targets = zs - cur_zs
-        print("z error", torch.linalg.norm(targets, dim=0).mean())
+        z_error = torch.linalg.norm(targets, dim=0).mean()
+        print("z error", z_error)
 
         repeat_factor = (layer_ks.size(1) // targets.size(1))
         targets = targets.repeat_interleave(repeat_factor, dim=1)
         resid = targets / (len(hparams.layers) - i)  # Distribute residual across layers
         layer_device = weights[f"{hparams.rewrite_module_tmp.format(layer)}.weight"].device
-        proj = P[i].to(device=layer_device, dtype=torch.float)
+        proj = P[layer].to(device=layer_device, dtype=torch.float)
         layer_ks = layer_ks.to(device=layer_device, dtype=torch.float)
         resid = resid.to(device=layer_device, dtype=torch.float)
         c = cache_c[i].to(device=layer_device, dtype=torch.float)
@@ -233,8 +262,22 @@ def execute_AlphaEdit(
         weight_name = f"{hparams.rewrite_module_tmp.format(layer)}.weight"
         upd_matrix = upd_matrix_match_shape(upd_matrix, weights[weight_name].shape)
 
-        print("orig norm", torch.linalg.norm(weights[weight_name]))
-        print("upd norm", torch.linalg.norm(upd_matrix))
+        original_weight_norm = torch.linalg.norm(weights[weight_name])
+        update_norm = torch.linalg.norm(upd_matrix)
+        print("orig norm", original_weight_norm)
+        print("upd norm", update_norm)
+
+        if return_statistics:
+            for request_index, request in enumerate(requests):
+                statistics.append(
+                    {
+                        "edited_layer": layer,
+                        "z_error": float(torch.linalg.norm(targets[:, request_index * repeat_factor]).detach().cpu()),
+                        "weight_norm_before_update": float(original_weight_norm.detach().cpu()),
+                        "weight_update_norm": float(update_norm.detach().cpu()),
+                        **temp_statistics[request.get("edit_id")],
+                    }
+                )
 
         # Update model weights and record desired changes in `delta` variable
         with torch.no_grad():
@@ -261,6 +304,8 @@ def execute_AlphaEdit(
     
     print(f"Deltas successfully computed for {list(weights.keys())}")
 
+    if return_statistics:
+        return deltas, statistics
     return deltas
 
 
