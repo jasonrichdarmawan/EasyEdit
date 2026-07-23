@@ -287,26 +287,39 @@ def execute_AlphaEdit_Circuit(
         # Insert
         for hub in sorted(hubs, key=lambda x: x["destination"]["layer"]):
             print(f"Hub:\n{json.dumps(hub, indent=4)}")
+
+            cached_target = None
+            cached_target_statistics = None
             
             for source in sorted(hub["sources"], key=lambda x: x["layer"]):
                 z_list = []
-                z_result = compute_z(
-                    model,
-                    tok,
-                    request,
-                    hparams,
-                    hub["destination"]["layer"],
-                    context_templates,
-                    source_enc=eap_tok,
-                    source_lookup_idx=hub["position"],
-                    rendered_source_prompt=eap_prompts[0],
-                    raw_source_prompt=request["prompt"],
-                    return_statistics=return_statistics,
-                )
-                if return_statistics:
-                    cur_z, target_statistics = z_result
+                if hparams.no_target_recompute and cached_target is not None:
+                    cur_z = cached_target
+                    if return_statistics:
+                        target_statistics = cached_target_statistics.copy()
                 else:
-                    cur_z = z_result
+                    z_result = compute_z(
+                        model,
+                        tok,
+                        request,
+                        hparams,
+                        hub["destination"]["layer"],
+                        context_templates,
+                        source_enc=eap_tok,
+                        source_lookup_idx=hub["position"],
+                        rendered_source_prompt=eap_prompts[0],
+                        raw_source_prompt=request["prompt"],
+                        return_statistics=return_statistics,
+                    )
+                    if return_statistics:
+                        cur_z, target_statistics = z_result
+                    else:
+                        cur_z = z_result
+
+                    if hparams.no_target_recompute:
+                        cached_target = cur_z.detach()
+                        if return_statistics:
+                            cached_target_statistics = target_statistics.copy()
                 
                 z_list.append(cur_z)
                 zs = torch.stack(z_list, dim=1) # shape [d_model, num_requests]

@@ -54,6 +54,10 @@ class AlphaEditCircuitHyperParams(HyperParams):
     mom2_batch_tokens: int = None
     
     use_subject_noise_baseline: bool = False
+    # When true, compute the target vector once for each request and reuse it
+    # for all selected hub/source updates. The default recomputes after each
+    # update, matching the existing AlphaEdit-Circuit behavior.
+    no_target_recompute: bool = False
 
     @classmethod
     def from_hparams(cls, hparams_name_or_path: str):

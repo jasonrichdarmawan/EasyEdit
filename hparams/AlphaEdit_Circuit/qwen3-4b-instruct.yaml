@@ -38,3 +38,4 @@ hook_mlp_in: "model.layers.{}.mlp"
 hook_resid_post: "model.layers.{}"
 
 use_subject_noise_baseline: True
+no_target_recompute: False
