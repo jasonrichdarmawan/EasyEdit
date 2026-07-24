@@ -60,7 +60,7 @@ def apply_Revised_AlphaEdit_to_model(
         print(f"The null-space projection matrix P does not exist and now calculate.")
         P = {}
         for layer in tqdm(hparams.layers, desc="Computing projection matrix"):
-            P[i] = get_project(model, tok, layer, hparams).to("cpu")
+            P[layer] = get_project(model, tok, layer, hparams).to("cpu")
         print("Saving null-space projection matrix P to avoid redundant future computations...")
         torch.save(P, P_filepath)
         P_loaded = True
@@ -73,7 +73,13 @@ def apply_Revised_AlphaEdit_to_model(
     # If this is the first calculation (i.e., cache_c_new == false), then initialize cache_c first
     if not cache_c_new:
         W_out = nethook.get_parameter(model, f"{hparams.rewrite_module_tmp.format(0)}.weight")
-        if any(1 for item in ["llama", "gpt-j-6b", "qwen3-4b", "tiny-aya-global"] if item in hparams.model_name.lower()):
+        if any(1 for item in [
+            "llama", "gpt-j-6b", 
+            "qwen3-4b", 
+            "qwen2.5-7b-instruct",
+            "tiny-aya-global", 
+            "aya-expanse-8b",
+        ] if item in hparams.model_name.lower()):
             cache_c_shape = (W_out.shape[1], W_out.shape[1])
         elif "gpt2-xl" in hparams.model_name.lower():
             cache_c_shape = (W_out.shape[0], W_out.shape[0])

@@ -160,20 +160,34 @@ def compute_z(
         output = tr[hparams.layer_module_tmp.format(loss_layer)].output
         if isinstance(output, tuple):
             output = output[0]
-        if output.shape[1] != rewriting_targets.shape[1]:
+        expected_batch_size = len(all_prompts)
+        expected_sequence_length = rewriting_targets.shape[1]
+        if output.ndim != 3:
+            raise RuntimeError(
+                "Expected traced loss-layer output to have shape "
+                f"[batch, sequence, hidden] or [sequence, batch, hidden], got {tuple(output.shape)}."
+            )
+        if output.shape[:2] == (expected_sequence_length, expected_batch_size):
             output = torch.transpose(output, 0, 1)
+        elif output.shape[:2] != (expected_batch_size, expected_sequence_length):
+            raise RuntimeError(
+                "Traced loss-layer output does not match the tokenized prompt dimensions: "
+                f"output shape={tuple(output.shape)}, expected batch={expected_batch_size}, "
+                f"expected sequence={expected_sequence_length}."
+            )
         full_repr = output[:len(rewriting_prompts)]
 
         log_probs = torch.log_softmax(ln_f(full_repr) @ lm_w.to(full_repr.device) + lm_b.to(full_repr.device), dim=2) # shape [batch, seq_len, vocab_size]
+        target_ids = rewriting_targets.to(log_probs.device)
+        mask = (target_ids != -100).float()
         loss = torch.gather(
             log_probs,
             2,
-            torch.where(rewriting_targets != -100, rewriting_targets, 0).unsqueeze(2).to(log_probs.device),
+            torch.where(target_ids != -100, target_ids, 0).unsqueeze(2),
         ).squeeze(2) # shape [batch, seq_len]
-        mask = (rewriting_targets != -100).float()
 
         # Aggregate total losses
-        nll_loss_each = -(loss * mask.to(loss.device)).sum(1) / mask.sum(1)
+        nll_loss_each = -(loss * mask).sum(1) / mask.sum(1)
         nll_loss = nll_loss_each.mean()
         
         kl_loss = hparams.kl_factor * torch.nn.functional.kl_div(
