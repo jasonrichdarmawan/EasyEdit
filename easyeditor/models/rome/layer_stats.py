@@ -61,7 +61,7 @@ def main():
 
     aa("--model_name", default="gpt2-xl", choices=[
         "gpt2-xl", "EleutherAI/gpt-j-6B", "Qwen/Qwen3-4B-Instruct-2507", "CohereLabs/tiny-aya-global",
-        "CohereLabs/aya-expanse-8b", "Qwen/Qwen2.5-7B"
+        "CohereLabs/aya-expanse-8b", "Qwen/Qwen2.5-7B", "Qwen/Qwen2.5-7B-Instruct",
     ])
     aa("--apply_chat_template", action="store_true")
     aa("--dataset", default="wikipedia", choices=["wikitext", "wikipedia"])
