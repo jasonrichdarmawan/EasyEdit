@@ -99,8 +99,8 @@ def apply_AlphaEdit_to_model(
 
     with torch.no_grad():
         for w_name, upd_m in deltas.items():
-            upd_matrix = upd_m.to(f"cuda:{hparams.device}")
             w = nethook.get_parameter(model, w_name)
+            upd_matrix = upd_m.to(w.device)
             upd_matrix = upd_matrix_match_shape(upd_matrix, w.shape)
 
             if return_orig_weights and w_name not in weights_copy:
@@ -159,6 +159,9 @@ def execute_AlphaEdit(
     # Compute z for final layer
     context_templates = get_context_templates(model, tok)
     z_layer = hparams.layers[-1]
+    z_device = next(
+        nethook.get_module(model, hparams.layer_module_tmp.format(z_layer)).parameters()
+    ).device
     z_list = []
 
     temp_statistics = {}
@@ -181,7 +184,7 @@ def execute_AlphaEdit(
         ):
             try:
                 data = np.load(cache_fname)
-                z_list.append(torch.from_numpy(data["v_star"]).to(f"cuda:{hparams.device}"))
+                z_list.append(torch.from_numpy(data["v_star"]).to(z_device))
                 data_loaded = True
             except Exception as e:
                 print(f"Error reading cache file due to {e}. Recomputing...")
@@ -299,7 +302,7 @@ def execute_AlphaEdit(
     
     for i, layer in enumerate(hparams.layers):
         layer_ks = compute_ks(model, tok, requests, hparams, layer, context_templates).T
-        cache_c[i] += layer_ks @ layer_ks.T
+        cache_c[i] += (layer_ks @ layer_ks.T).to(cache_c[i].device)
 
     # Restore state of original model
     with torch.no_grad():
@@ -350,9 +353,9 @@ def get_cov(
         )
         COV_CACHE[key] = stat.mom2.moment().float().to("cpu")
 
-    return (
-        torch.inverse(COV_CACHE[key].to(f"cuda:{hparams.device}")) if inv else COV_CACHE[key].to(f"cuda:{hparams.device}")
-    )
+    module_device = next(nethook.get_module(model, layer_name).parameters()).device
+    covariance = COV_CACHE[key].to(module_device)
+    return torch.inverse(covariance) if inv else covariance
 
 
 def upd_matrix_match_shape(matrix: torch.Tensor, shape: torch.Size) -> torch.Tensor:

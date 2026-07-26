@@ -14,6 +14,7 @@ def compute_ks(
     layer: int,
     context_templates: list[str],
 ):
+    input_device = model.get_input_embeddings().weight.device
     all_prompts = []
     prompt_request_idx = []
     for i in range(len(requests)):
@@ -30,7 +31,7 @@ def compute_ks(
         return_tensors="pt",
         padding=True,
         add_special_tokens=True,
-    ).to(model.device)
+    ).to(input_device)
     
     idxs = []
     if hparams.fact_token == "subject_first":

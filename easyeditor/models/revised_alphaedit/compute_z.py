@@ -26,6 +26,10 @@ def compute_z(
         nethook.get_module(model, f"{hparams.lm_head_module}").weight.T,
         nethook.get_module(model, hparams.ln_f_module),
     )
+    input_device = model.get_input_embeddings().weight.device
+    rewrite_device = next(
+        nethook.get_module(model, hparams.layer_module_tmp.format(layer)).parameters()
+    ).device
     try:
         lm_b = nethook.get_parameter(model, f"{hparams.lm_head_module}.bias")
     except LookupError as _:
@@ -53,10 +57,10 @@ def compute_z(
         return_tensors="pt",
         padding=True,
         add_special_tokens=True,
-    ).to(model.device)
+    ).to(input_device)
 
     # Compute rewriting targets
-    rewriting_targets = torch.tensor(-100, device=model.device).repeat(
+    rewriting_targets = torch.tensor(-100, device=input_device).repeat(
         len(rewriting_prompts), input_tok["input_ids"].shape[1]
     )
     for i in range(len(rewriting_prompts)):
@@ -93,9 +97,9 @@ def compute_z(
     # rewrite layer, i.e. hypothesized fact lookup location, will induce the
     # target token to be predicted at the final layer.
     if hasattr(model.config, 'n_embd'):
-        delta = torch.zeros((model.config.n_embd,), requires_grad=True, device=model.device)
+        delta = torch.zeros((model.config.n_embd,), requires_grad=True, device=rewrite_device)
     elif hasattr(model.config, 'hidden_size'):
-        delta = torch.zeros((model.config.hidden_size,), requires_grad=True, device=model.device)
+        delta = torch.zeros((model.config.hidden_size,), requires_grad=True, device=rewrite_device)
     else:
         raise NotImplementedError
     target_init, kl_distr_init = None, None

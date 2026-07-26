@@ -207,7 +207,7 @@ def execute_Revised_AlphaEdit(
                 return_tensors="pt",
                 padding=True,
                 add_special_tokens=True,
-            ).to(model.device)
+            ).to(model.get_input_embeddings().weight.device)
             
             idxs = []
             if hparams.fact_token == "subject_first":
@@ -368,7 +368,7 @@ def get_context_templates(model, tokenizer):
             ["The", "Therefore", "Because", "I", "You"],
             padding=True,
             return_tensors="pt",
-        ).to(model.device)
+        ).to(model.get_input_embeddings().weight.device)
         for length, n_gen in [(10, 5)]:
             gen_token = model.generate(
                 **prompt_tok,

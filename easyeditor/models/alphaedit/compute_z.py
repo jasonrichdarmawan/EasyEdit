@@ -29,6 +29,10 @@ def compute_z(
         nethook.get_module(model, f"{hparams.lm_head_module}").weight.T,
         nethook.get_module(model, hparams.ln_f_module),
     )
+    input_device = model.get_input_embeddings().weight.device
+    rewrite_device = next(
+        nethook.get_module(model, hparams.layer_module_tmp.format(layer)).parameters()
+    ).device
     try:
         lm_b = nethook.get_parameter(model, f"{hparams.lm_head_module}.bias")
     except LookupError as _:
@@ -37,7 +41,9 @@ def compute_z(
     print("Computing right vector (v)")
 
     # Tokenize target into list of int token IDs
-    target_ids = tok.encode(request["target_new"], return_tensors="pt", add_special_tokens=False).to(f"cuda:{hparams.device}")[0]
+    target_ids = tok.encode(
+        request["target_new"], return_tensors="pt", add_special_tokens=False
+    ).to(input_device)[0]
 
     if target_ids[0] == tok.bos_token_id or target_ids[0] == tok.unk_token_id:
         target_ids = target_ids[1:]
@@ -53,10 +59,10 @@ def compute_z(
         [prompt.format(request["subject"]) for prompt in all_prompts],
         return_tensors="pt",
         padding=True,
-    ).to(f"cuda:{hparams.device}")
+    ).to(input_device)
 
     # Compute rewriting targets
-    rewriting_targets = torch.tensor(-100, device=f"cuda:{hparams.device}").repeat(
+    rewriting_targets = torch.tensor(-100, device=input_device).repeat(
         len(rewriting_prompts), *input_tok["input_ids"].shape[1:]
     )
 
@@ -81,9 +87,9 @@ def compute_z(
     # rewrite layer, i.e. hypothesized fact lookup location, will induce the
     # target token to be predicted at the final layer.
     if hasattr(model.config, 'n_embd'):
-        delta = torch.zeros((model.config.n_embd,), requires_grad=True, device=f"cuda:{hparams.device}")
+        delta = torch.zeros((model.config.n_embd,), requires_grad=True, device=rewrite_device)
     elif hasattr(model.config, 'hidden_size'):
-        delta = torch.zeros((model.config.hidden_size,), requires_grad=True, device=f"cuda:{hparams.device}")
+        delta = torch.zeros((model.config.hidden_size,), requires_grad=True, device=rewrite_device)
     else:
         raise NotImplementedError
     target_init, kl_distr_init = None, None
@@ -155,12 +161,17 @@ def compute_z(
         full_repr = output[:len(rewriting_prompts)]
 
         log_probs = torch.log_softmax(ln_f(full_repr) @ lm_w.to(full_repr.device) + lm_b.to(full_repr.device), dim=2)
+        rewriting_targets_on_loss_device = rewriting_targets.to(log_probs.device)
         loss = torch.gather(
             log_probs,
             2,
-            torch.where(rewriting_targets != -100, rewriting_targets, 0).unsqueeze(2).to(log_probs.device),
+            torch.where(
+                rewriting_targets_on_loss_device != -100,
+                rewriting_targets_on_loss_device,
+                0,
+            ).unsqueeze(2),
         ).squeeze(2)
-        mask = (rewriting_targets != -100).float()
+        mask = (rewriting_targets_on_loss_device != -100).float()
 
         # Aggregate total losses
         nll_loss_each = -(loss * mask.to(loss.device)).sum(1) / target_ids.size(0)
