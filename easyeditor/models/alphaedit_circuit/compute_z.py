@@ -217,10 +217,12 @@ def compute_z(
             2,
             torch.where(rewriting_targets != -100, rewriting_targets, 0).unsqueeze(2).to(log_probs.device),
         ).squeeze(2) # shape [batch, seq_len]
-        mask = (rewriting_targets != -100).float()
+        # `rewriting_targets` is created with the input device, while the loss
+        # layer can be placed on a different GPU by a device map.
+        mask = (rewriting_targets != -100).float().to(loss.device)
 
         # Aggregate total losses
-        nll_loss_each = -(loss * mask.to(loss.device)).sum(1) / mask.sum(1)
+        nll_loss_each = -(loss * mask).sum(1) / mask.sum(1)
         nll_loss = nll_loss_each.mean()
         
         kl_loss = hparams.kl_factor * torch.nn.functional.kl_div(

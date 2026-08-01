@@ -78,7 +78,7 @@ def apply_AlphaEdit_Circuit_to_model(
     # If this is the first calculation (i.e., cache_c_new == false), then initialize cache_c first
     if not cache_c_new:
         W_out = nethook.get_parameter(model, f"{hparams.rewrite_module_tmp.format(0)}.weight")
-        if any(1 for item in ["llama", "gpt-j-6b", "qwen3-4b", "tiny-aya-global"] if item in hparams.model_name.lower()):
+        if any(1 for item in ["llama", "gpt-j-6b", "qwen3-4b", "tiny-aya-global", "qwen2.5-7b-instruct"] if item in hparams.model_name.lower()):
             cache_c_shape = (W_out.shape[1], W_out.shape[1])
         elif "gpt2-xl" in hparams.model_name.lower():
             cache_c_shape = (W_out.shape[0], W_out.shape[0])

@@ -1076,6 +1076,7 @@ def get_tiny_aya_like_components(model, layer_idx):
 COMPONENT_REGISTRY = {
     "GPT2LMHeadModel": get_gpt2_components,
     "LlamaForCausalLM": get_llama_like_components,
+    "Qwen2ForCausalLM": get_llama_like_components,
     "Qwen3ForCausalLM": get_llama_like_components,
     "Cohere2ForCausalLM": get_tiny_aya_like_components,
 }
@@ -1107,6 +1108,20 @@ def get_llama_like_config(model):
     }
     return c
 
+def get_qwen2_config(model):
+    config = model.config
+    c = {
+        "is_qkv_fused": False,
+        "is_qkv_conv1d": False,
+        "n_layers": config.num_hidden_layers,
+        "n_heads": config.num_attention_heads,
+        "n_kv_heads": config.num_key_value_heads,
+        "hidden_size": config.hidden_size,
+        "head_dim": config.hidden_size // config.num_attention_heads,
+        "parallel_attn_mlp": False,
+    }
+    return c
+
 def get_tiny_aya_like_config(model):
     config = model.config
     c = {
@@ -1124,6 +1139,7 @@ def get_tiny_aya_like_config(model):
 CONFIG_REGISTRY = {
     "GPT2LMHeadModel": get_gpt2_config,
     "LlamaForCausalLM": get_llama_like_config,
+    "Qwen2ForCausalLM": get_qwen2_config,
     "Qwen3ForCausalLM": get_llama_like_config,
     "Cohere2ForCausalLM": get_tiny_aya_like_config,
 }
