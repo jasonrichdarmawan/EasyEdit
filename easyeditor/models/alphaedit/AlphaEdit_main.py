@@ -276,15 +276,16 @@ def execute_AlphaEdit(
 
         if return_statistics:
             for request_index, request in enumerate(requests):
-                statistics.append(
-                    {
-                        "edited_layer": layer,
-                        "z_error": float(torch.linalg.norm(targets[:, request_index * repeat_factor]).detach().cpu()),
-                        "weight_norm_before_update": float(original_weight_norm.detach().cpu()),
-                        "weight_update_norm": float(update_norm.detach().cpu()),
-                        **temp_statistics[request.get("edit_id")],
-                    }
-                )
+                statistic = {
+                    "edited_layer": layer,
+                    "z_error": float(torch.linalg.norm(targets[:, request_index * repeat_factor]).detach().cpu()),
+                    "weight_norm_before_update": float(original_weight_norm.detach().cpu()),
+                    "weight_update_norm": float(update_norm.detach().cpu()),
+                    **temp_statistics[request.get("edit_id")],
+                }
+                if layer > hparams.layers[0]:
+                    statistic["optimization_steps"] = 0
+                statistics.append(statistic)
 
         # Update model weights and record desired changes in `delta` variable
         with torch.no_grad():
