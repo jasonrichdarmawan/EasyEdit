@@ -2,14 +2,23 @@ import os
 from pathlib import Path
 
 import torch
-from datasets import load_dataset
+from datasets import load_dataset, Dataset
+import logging
 from tqdm.auto import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ...util.globals import *
 from ...util.device import normalize_device
-from ...util.nethook import Trace, set_requires_grad
-from ...util.runningstats import CombinedStat, Mean, NormMean, SecondMoment, tally
+from ...util.nethook import TraceDict, set_requires_grad
+from ...util.runningstats import (
+    CombinedStat,
+    Mean,
+    NormMean,
+    SecondMoment,
+    load_cached_state,
+    make_loader,
+    save_cached_state,
+)
 
 from .tok_dataset import (
     TokenizedDataset,
@@ -18,12 +27,15 @@ from .tok_dataset import (
     length_collation,
 )
 
+from .fake_dataset import FakeTokenDataset
+
 STAT_TYPES = {
     "mom2": SecondMoment,
     "mean": Mean,
     "norm_mean": NormMean,
 }
 
+LOGGER = logging.getLogger(__name__)
 
 def main():
     """
@@ -36,14 +48,17 @@ def main():
     def aa(*args, **kwargs):
         parser.add_argument(*args, **kwargs)
 
-    aa("--model_name", default="gpt2-xl", choices=["gpt2-xl", "EleutherAI/gpt-j-6B"])
+    aa("--model_name", default="gpt2-xl", choices=[
+        "gpt2-xl", "EleutherAI/gpt-j-6B",
+        "Qwen/Qwen3-8B", "ibm-granite/granite-4.2-8b",
+    ])
     aa("--dataset", default="wikipedia", choices=["wikitext", "wikitext2", "wikipedia"])
     aa("--layers", default=[17], type=lambda x: list(map(int, x.split(","))))
     aa("--to_collect", default=["mom2"], type=lambda x: x.split(","))
     aa("--sample_size", default=100000, type=lambda x: None if x == "all" else int(x))
     aa("--batch_tokens", default=None, type=lambda x: None if x == "any" else int(x))
     aa("--precision", default="float32", choices=["float64", "float32", "float16"])
-    aa("--stats_dir", default=STATS_DIR)
+    aa("--stats_dir", default="runs/stats")
     aa("--download", default=1, type=int, choices=[0, 1])
     args = parser.parse_args()
 
@@ -79,7 +94,7 @@ def main():
 def layer_stats(
     model,
     tokenizer,
-    layer_name,
+    layer_name: str | list[str],
     stats_dir,
     ds_name,
     to_collect,
@@ -90,23 +105,28 @@ def layer_stats(
     download=True,
     progress=tqdm,
     force_recompute=False,
-    hparams=None
+    hparams=None,
+    fake_samples=0,
+    fake_seq_len=2**13,
 ):
     """
     Function to load or compute cached stats.
     """
+    if isinstance(layer_name, str):
+        layer_name = [layer_name]
+
+    # Load_From_File
+    # from datasets import Dataset
+    # raw_ds = Dataset.from_file('XXX/XXX/wikipedia-train.arrow')
+    # raw_ds = {'train': raw_ds}
+    dataset_map = {
+        "wikitext": ("Salesforce/wikitext", "wikitext-103-raw-v1"),
+        "wikitext2": ("Salesforce/wikitext", "wikitext-2-raw-v1"),
+        "wikipedia": ("wikimedia/wikipedia", "20231101.en"),
+    }
+    dataset_name, dataset_config = dataset_map[ds_name]
 
     def get_ds():
-        # Load_From_File
-        # from datasets import Dataset
-        # raw_ds = Dataset.from_file('XXX/XXX/wikipedia-train.arrow')
-        # raw_ds = {'train': raw_ds}
-        dataset_map = {
-            "wikitext": ("Salesforce/wikitext", "wikitext-103-raw-v1"),
-            "wikitext2": ("Salesforce/wikitext", "wikitext-2-raw-v1"),
-            "wikipedia": ("wikimedia/wikipedia", "20231101.en"),
-        }
-        dataset_name, dataset_config = dataset_map[ds_name]
         raw_ds = load_dataset(dataset_name, dataset_config)
         if hasattr(model.config, 'n_positions'):
             maxlen = model.config.n_positions
@@ -157,50 +177,81 @@ def layer_stats(
     if precision is None:
         precision = "float64"
     dtype = getattr(torch, precision)
+    sample_size = sample_size if fake_samples == 0 else fake_samples
     size_suffix = "" if sample_size is None else f"_{sample_size}"
     if batch_tokens < npos:
-        size_suffix = "_t{batch_tokens}" + size_suffix
+        size_suffix = f"_t{batch_tokens}" + size_suffix
     if model_name is None:
         # model_name = model.config._name_or_path.replace("/", "_")
         model_name = model.config._name_or_path.rsplit("/")[-1]
 
     stats_dir = Path(stats_dir)
-    file_extension = f"{model_name}/{ds_name}_stats/{layer_name}_{precision}_{'-'.join(sorted(to_collect))}{size_suffix}.npz"
-    filename = stats_dir / file_extension
 
-    print(f"Computing Cov locally....")
+    args = {"sample_size": sample_size}
+    stats = {}
+    for module_name in layer_name:
+        file_extension = f"{model_name}/{ds_name}/{dataset_config}/{module_name}_{precision}_{'-'.join(sorted(to_collect))}{size_suffix}.npz"
+        file_name = stats_dir / file_extension
 
-    ds = get_ds() if not filename.exists() else None
+        stat = CombinedStat(**{k: STAT_TYPES[k]() for k in to_collect})
+        logging.info(f"Trying to load cached stats from {file_name}...")
+        cached_state = load_cached_state(file_name, args)
+        if cached_state is not None and not force_recompute:
+            logging.info(f"Loaded cached stats from {file_name}.")
+            stat.load_state_dict(cached_state)
+
+        stats[module_name] = (file_name, stat, cached_state)
+
+    # backward compatibility
+    if all(cached_state for _, _, cached_state in stats.values()):
+        return stats[layer_name[0]][1]
+
+    logging.info(f"Computing Cov locally....")
+
+    needs_computation = force_recompute or any(cached_state is None for _, _, cached_state in stats.values())
+    if needs_computation:
+        ds = FakeTokenDataset(fake_samples, fake_seq_len) if fake_samples > 0 else get_ds()
 
     if progress is None:
         progress = lambda x: x
 
-    stat = CombinedStat(**{k: STAT_TYPES[k]() for k in to_collect})
-    loader = tally(
-        stat,
-        ds,
-        cache=(filename if not force_recompute else None),
-        sample_size=sample_size,
-        batch_size=batch_size,
-        collate_fn=length_collation(batch_tokens),
-        pin_memory=True,
-        random_sample=1,
-        num_workers=2,
-    )
+    loader = []
+    if needs_computation:
+        loader = make_loader(
+            ds,
+            sample_size=sample_size,
+            batch_size=batch_size,
+            collate_fn=length_collation(batch_tokens),
+            pin_memory=True,
+            random_sample=1,
+            num_workers=2,
+        )
+    
     batch_count = -(-(sample_size or len(ds)) // batch_size)
     with torch.no_grad():
-        for batch_group in progress(loader, total=batch_count):
-            for batch in batch_group:
+        for batch_group in progress(loader, total=batch_count, desc="Computing Cov", unit="batch_group"):
+            for batch in tqdm(batch_group, unit="batch"):
                 batch = dict_to_(batch, normalize_device(getattr(hparams, "device", None)))
-                with Trace(
+                with TraceDict(
                     model, layer_name, retain_input=True, retain_output=False, stop=True
                 ) as tr:
-                    model(**batch)
-                feats = flatten_masked_batch(tr.input, batch["attention_mask"])
-                # feats = flatten_masked_batch(tr.output, batch["attention_mask"])
-                feats = feats.to(dtype=dtype)
-                stat.add(feats)
-    return stat
+                    model(**batch, use_cache=False)
+
+                for module_name, (_, stat, cached_state) in stats.items():
+                    if cached_state is not None and not force_recompute:
+                        continue
+                    feats = flatten_masked_batch(tr[module_name].input, batch["attention_mask"])
+                    # feats = flatten_masked_batch(tr.output, batch["attention_mask"])
+                    feats = feats.to(dtype=dtype)
+                    stat.add(feats)
+
+    for module_name, (file_name, stat, cached_state) in stats.items():
+        if cached_state is not None and not force_recompute:
+            continue
+        save_cached_state(file_name, stat, args)
+    
+    # backward compatibility
+    return stats[layer_name[0]][1]
 
 
 if __name__ == "__main__":

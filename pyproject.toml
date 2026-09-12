@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools>=58"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "easyeditor"
+version = "0.0.0"
+description = "Editable local fork of EasyEdit"
+requires-python = ">=3.9"
+
+[tool.setuptools.packages.find]
+include = ["easyeditor"]
