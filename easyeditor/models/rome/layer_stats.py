@@ -126,29 +126,31 @@ def layer_stats(
     }
     dataset_name, dataset_config = dataset_map[ds_name]
 
+    if hasattr(model.config, 'n_positions'):
+        maxlen = model.config.n_positions
+    elif hasattr(model.config, 'max_sequence_length'):
+        maxlen = model.config.max_sequence_length
+    elif hasattr(model.config, 'max_position_embeddings'):
+        maxlen = model.config.max_position_embeddings
+    elif hasattr(model.config,'seq_length'):
+        maxlen = model.config.seq_length
+    else:
+        raise NotImplementedError
+            
+    if hasattr(model.config, 'model_type') and 'mistral' in model.config.model_type:
+        if hasattr(model.config, 'sliding_window') and model.config.sliding_window:
+            maxlen = model.config.sliding_window or 4096
+        else:
+            maxlen = 4096
+    if hasattr(model.config, 'model_type') and any(pattern in model.config.model_type for pattern in ["qwen", "granite"]):
+        maxlen = min(maxlen, 4096)
+
+    if batch_tokens is not None and batch_tokens < maxlen:
+        maxlen = batch_tokens
+
     def get_ds():
         raw_ds = load_dataset(dataset_name, dataset_config)
-        if hasattr(model.config, 'n_positions'):
-            maxlen = model.config.n_positions
-        elif hasattr(model.config, 'max_sequence_length'):
-            maxlen = model.config.max_sequence_length
-        elif hasattr(model.config, 'max_position_embeddings'):
-            maxlen = model.config.max_position_embeddings
-        elif hasattr(model.config,'seq_length'):
-            maxlen = model.config.seq_length
-        else:
-            raise NotImplementedError
-                
-        if hasattr(model.config, 'model_type') and 'mistral' in model.config.model_type:
-            if hasattr(model.config, 'sliding_window') and model.config.sliding_window:
-                maxlen = model.config.sliding_window or 4096
-            else:
-                maxlen = 4096
-        if hasattr(model.config, 'model_type') and 'qwen' in model.config.model_type:
-            maxlen = min(maxlen, 4096)
 
-        if batch_tokens is not None and batch_tokens < maxlen:
-            maxlen = batch_tokens
         return TokenizedDataset(raw_ds["train"], tokenizer, maxlen=maxlen)
 
     # Continue with computation of statistics
@@ -179,8 +181,9 @@ def layer_stats(
     dtype = getattr(torch, precision)
     sample_size = sample_size if fake_samples == 0 else fake_samples
     size_suffix = "" if sample_size is None else f"_{sample_size}"
+    size_suffix = f"_t{maxlen}" + size_suffix
     if batch_tokens < npos:
-        size_suffix = f"_t{batch_tokens}" + size_suffix
+        size_suffix = f"_bt{batch_tokens}" + size_suffix
     if model_name is None:
         # model_name = model.config._name_or_path.replace("/", "_")
         model_name = model.config._name_or_path.rsplit("/")[-1]
