@@ -148,6 +148,9 @@ def layer_stats(
     if batch_tokens is not None and batch_tokens < maxlen:
         maxlen = batch_tokens
 
+    if fake_samples > 0:
+        maxlen = fake_seq_len
+
     def get_ds():
         raw_ds = load_dataset(dataset_name, dataset_config)
 
