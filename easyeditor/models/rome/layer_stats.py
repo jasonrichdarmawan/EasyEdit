@@ -185,8 +185,8 @@ def layer_stats(
     sample_size = sample_size if fake_samples == 0 else fake_samples
     size_suffix = "" if sample_size is None else f"_{sample_size}"
     size_suffix = f"_t{maxlen}" + size_suffix
-    if batch_tokens < npos:
-        size_suffix = f"_bt{batch_tokens}" + size_suffix
+    # batch_tokens is irrelevant for mom2 computation but file naming should be consistent.
+    size_suffix = f"_bt{batch_tokens}" + size_suffix
     if model_name is None:
         # model_name = model.config._name_or_path.replace("/", "_")
         model_name = model.config._name_or_path.rsplit("/")[-1]

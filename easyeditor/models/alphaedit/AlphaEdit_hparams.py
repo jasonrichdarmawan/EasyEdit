@@ -32,8 +32,14 @@ class AlphaEditHyperParams(HyperParams):
 
     # Statistics
     mom2_dataset: str
+    mom2_subset: str
     mom2_n_samples: int
     mom2_dtype: str
+
+    # batch tokens is irrelevant for mom2 computation
+    # but used for file naming.
+    mom2_batch_tokens: int
+
     nullspace_threshold: float
     L2: float
     alg_name: str

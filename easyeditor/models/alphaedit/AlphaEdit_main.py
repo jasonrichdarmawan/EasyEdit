@@ -58,21 +58,19 @@ def apply_AlphaEdit_to_model(
     # Calculate the null-space projection matrix P
     # Please ensure that you have downloaded "null_space_project.pt" to the easyedit folder beforehand, or get the P by following calculation
     if not os.path.exists(hparams.P_loc):
-        print(os.path.abspath(hparams.P_loc))
+        print("Path to null-space projection matrix:", os.path.abspath(hparams.P_loc))
         print(f"The null-space projection matrix P does not exist and now calculate.")
         W_out = nethook.get_parameter(model, f"{hparams.rewrite_module_tmp.format(hparams.layers[-1])}.weight")
-        if (
-            "llama" in hparams.model_name.lower()
-            or "qwen" in hparams.model_name.lower()
-            or "gpt-j-6b" in hparams.model_name.lower()
-        ):
-            P = torch.zeros((len(hparams.layers), W_out.shape[1], W_out.shape[1]), device="cpu")
-        elif "gpt2-xl" in hparams.model_name.lower():
+        if "gpt2-xl" in hparams.model_name.lower():
             P = torch.zeros((len(hparams.layers), W_out.shape[0], W_out.shape[0]), device="cpu")
+        else: # modern LLMs
+            P = torch.zeros((len(hparams.layers), W_out.shape[1], W_out.shape[1]), device="cpu")
+
         del W_out
         for i, layer in enumerate(hparams.layers):
             P[i,:,:] = get_project(model, tok, layer, hparams)
-        torch.save(P, "null_space_project.pt")
+        torch.save(P, hparams.P_loc)
+        print("Null-space projection matrix P saved to %s", hparams.P_loc)
         P_loaded = True
     elif P_loaded == False:
         P = torch.load(hparams.P_loc)
@@ -82,10 +80,10 @@ def apply_AlphaEdit_to_model(
     # If this is the first calculation (i.e., cache_c_new == false), then initialize cache_c first
     if not cache_c_new:
         W_out = nethook.get_parameter(model, f"{hparams.rewrite_module_tmp.format(hparams.layers[-1])}.weight")
-        if "llama" in hparams.model_name.lower() or "qwen" in hparams.model_name.lower():
-            cache_c = torch.zeros((len(hparams.layers), W_out.shape[1], W_out.shape[1]), device="cpu")
-        elif "gpt2-xl" in hparams.model_name.lower():
+        if "gpt2-xl" in hparams.model_name.lower():
             cache_c = torch.zeros((len(hparams.layers), W_out.shape[0], W_out.shape[0]), device="cpu")
+        else: # modern LLMs
+            cache_c = torch.zeros((len(hparams.layers), W_out.shape[1], W_out.shape[1]), device="cpu")
         del W_out
         cache_c_new = True
     
@@ -304,6 +302,7 @@ def get_cov(
             precision=mom2_dtype,
             hparams=hparams,
             force_recompute=force_recompute,
+            batch_tokens=hparams.mom2_batch_tokens,
         )
         COV_CACHE[key] = stat.mom2.moment().float().to("cpu")
 
@@ -362,9 +361,9 @@ def get_project(model, tok, layer, hparams):
         hparams.mom2_dtype,
         force_recompute=force_recompute,
         hparams=hparams
-    ).cpu()
+    )
     U, S, _ = torch.linalg.svd(cov, full_matrices=False)
     threshold = hparams.nullspace_threshold
     small_singular_indices = (S < threshold).nonzero(as_tuple=True)[0]
-    print(len(small_singular_indices))
+    print("Number of small singular values:", len(small_singular_indices))
     return U[:, small_singular_indices] @ U[:, small_singular_indices].T
