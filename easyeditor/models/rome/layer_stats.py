@@ -108,6 +108,7 @@ def layer_stats(
     hparams=None,
     fake_samples=0,
     fake_seq_len=2**13,
+    apply_chat_template=False,
 ):
     """
     Function to load or compute cached stats.
@@ -154,7 +155,7 @@ def layer_stats(
     def get_ds():
         raw_ds = load_dataset(dataset_name, dataset_config)
 
-        return TokenizedDataset(raw_ds["train"], tokenizer, maxlen=maxlen)
+        return TokenizedDataset(raw_ds["train"], tokenizer, maxlen=maxlen, apply_chat_template=apply_chat_template)
 
     # Continue with computation of statistics
     batch_size = 100  # Examine this many dataset texts at once
@@ -196,8 +197,7 @@ def layer_stats(
     args = {"sample_size": sample_size}
     stats = {}
     for module_name in layer_name:
-        file_extension = f"{model_name}/{ds_name}/{dataset_config}/{module_name}_{precision}_{'-'.join(sorted(to_collect))}{size_suffix}.npz"
-        file_name = stats_dir / file_extension
+        file_name = stats_dir / f"{module_name}_{precision}_{'-'.join(sorted(to_collect))}{size_suffix}.npz"
 
         stat = CombinedStat(**{k: STAT_TYPES[k]() for k in to_collect})
         logging.info(f"Trying to load cached stats from {file_name}...")

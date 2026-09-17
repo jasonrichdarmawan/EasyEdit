@@ -239,7 +239,7 @@ def execute_Revised_AlphaEdit(
             proj = P[layer].to(device=layer_device, dtype=torch.float).detach()
             layer_ks = layer_ks.to(device=layer_device, dtype=torch.float).detach()
             resid = resid.to(device=layer_device, dtype=torch.float).detach()
-            c = cache_c[layer].to(device=layer_device, dtype=torch.float).detach()
+            c = cache_c[layer].to(device=layer_device, dtype=torch.float, copy=True).detach()
 
             with torch.no_grad():
                 k1k1 = layer_ks @ layer_ks.T
@@ -285,9 +285,9 @@ def execute_Revised_AlphaEdit(
             with torch.no_grad():
                 weights[weight_name][...] = weights[weight_name] + upd_matrix.float()
                 if deltas.get(weight_name) is None:
-                    deltas[weight_name] = upd_matrix.detach().cpu()
+                    deltas[weight_name] = upd_matrix.detach()
                 else:
-                    deltas[weight_name] += upd_matrix.detach().cpu()
+                    deltas[weight_name] += upd_matrix.detach()
                 del upd_matrix
 
             updates_done += 1

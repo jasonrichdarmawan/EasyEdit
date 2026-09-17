@@ -10,11 +10,12 @@ class TokenizedDataset(Dataset):
     ids and attention masks, they can be supplied direcly to the model.
     """
 
-    def __init__(self, text_dataset, tokenizer=None, maxlen=None, field="text"):
+    def __init__(self, text_dataset, tokenizer=None, maxlen=None, field="text", apply_chat_template=False):
         self.text_dataset = text_dataset
         self.field = field
         self.tokenizer = tokenizer
         self.maxlen = maxlen
+        self.apply_chat_template = apply_chat_template
         if hasattr(text_dataset, "info"):
             self.info = text_dataset.info
 
@@ -25,16 +26,16 @@ class TokenizedDataset(Dataset):
         text = self.text_dataset[i]
         if self.field is not None:
             text = text[self.field]
-        token_list = self.tokenizer.encode(
-            text, truncation=True, max_length=self.maxlen
-        )
-        position_ids = list(range(len(token_list)))
-        attention_mask = [1] * len(token_list)
-        return dict(
-            input_ids=torch.tensor(token_list),
-            position_ids=torch.tensor(position_ids),
-            attention_mask=torch.tensor(attention_mask),
-        )
+        if self.apply_chat_template:
+            messages = [
+                {"role": "user", "content": text},
+            ]
+            text = self.tokenizer.apply_chat_template(messages, tokenize=False)
+            output = self.tokenizer(text, truncation=True, max_length=self.maxlen, return_tensors="pt", add_special_tokens=False)
+        else:
+            output = self.tokenizer(text, truncation=True, max_length=self.maxlen, return_tensors="pt")
+
+        return {k: v.squeeze(0) for k, v in output.items()}
 
 
 def dict_to_(data, device):
