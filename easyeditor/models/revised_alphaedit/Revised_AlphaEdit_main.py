@@ -23,6 +23,8 @@ COV_CACHE = {}
 P_loaded = False
 cache_c_new = False
 
+edit_count = 0
+
 def apply_Revised_AlphaEdit_to_model(
     model: AutoModelForCausalLM,
     tok: AutoTokenizer,
@@ -121,6 +123,7 @@ def execute_Revised_AlphaEdit(
     cache_template: Optional[str] = None,
     return_statistics: bool = False,
 ) -> Dict[str, Tuple[torch.Tensor]] | Tuple[Dict[str, Tuple[torch.Tensor]], List[Dict[str, Any]]]:
+    global edit_count
 
     deltas = {}
     statistics = []
@@ -159,7 +162,7 @@ def execute_Revised_AlphaEdit(
         updates_done = 0
         for layer in hparams.layers: # ablation
             z_list = []
-            z_result = compute_z(
+            results = compute_z(
                 model=model,
                 tok=tok,
                 request=request,
@@ -168,10 +171,14 @@ def execute_Revised_AlphaEdit(
                 context_templates=context_templates,
                 return_statistics=return_statistics,
             )
+            cur_z = results["cur_z"]
+            target_init = results["target_init"]
             if return_statistics:
-                cur_z, target_statistics = z_result
-            else:
-                cur_z = z_result
+                target_statistics = results["target_statistics"]
+
+            if target_init.norm() > 1000:
+                print(f"Warning: target_init norm is {target_init.norm()}, which is unusually large. This may indicate an issue with the computation.")
+                break
             
             z_list.append(cur_z)
             zs = torch.stack(z_list, dim=1) # shape [d_model, num_requests]
@@ -271,7 +278,7 @@ def execute_Revised_AlphaEdit(
                 target_statistics.update(
                     {
                         "case_id": request.get("case_id"),
-                        "edit_id": request.get("edit_id"),
+                        "edit_id": edit_count,
                         "edited_layer": layer,
                         "target_layer": hparams.layers[-1],
                         "z_error": float(z_error.detach().cpu()),
@@ -296,6 +303,8 @@ def execute_Revised_AlphaEdit(
     with torch.no_grad():
         for k, v in weights.items():
             v[...] = weights_copy[k]
+
+    edit_count += 1
     
     if return_statistics:
         return deltas, statistics
