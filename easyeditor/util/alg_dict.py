@@ -21,6 +21,7 @@ from ..models.alphaedit_circuit import AlphaEditCircuitHyperParams, apply_AlphaE
 from ..models.revised_alphaedit import Revised_AlphaEditHyperParams, apply_Revised_AlphaEdit_to_model
 from .. models.deepedit_api import DeepEditApiHyperParams, apply_deepedit_api_to_model
 from ..models.dpo import DPOHyperParams, apply_dpo_to_model
+from ..models.encore import ENCOREHyperParams, apply_encore_to_model
 
 ALG_DICT = {
     'ROME': apply_rome_to_model,
@@ -45,6 +46,7 @@ ALG_DICT = {
     "AlphaEdit_Circuit": apply_AlphaEdit_Circuit_to_model,
     'Revised_AlphaEdit': apply_Revised_AlphaEdit_to_model,
     "DeepEdit-Api": apply_deepedit_api_to_model,
+    "ENCORE": apply_encore_to_model,
 }
 
 ALG_MULTIMODAL_DICT = {
