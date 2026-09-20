@@ -27,6 +27,9 @@ def compute_z(
         nethook.get_module(model, f"{hparams.lm_head_module}").weight.T,
         nethook.get_module(model, hparams.ln_f_module),
     )
+    rewrite_device = next(
+        nethook.get_module(model, hparams.layer_module_tmp.format(layer)).parameters()
+    ).device
     try:
         lm_b = nethook.get_parameter(model, f"{hparams.lm_head_module}.bias")
     except LookupError as _:
@@ -81,9 +84,9 @@ def compute_z(
     # rewrite layer, i.e. hypothesized fact lookup location, will induce the
     # target token to be predicted at the final layer.
     if hasattr(model.config, 'n_embd'):
-        delta = torch.zeros((model.config.n_embd,), requires_grad=True, device=model.device)
+        delta = torch.zeros((model.config.n_embd,), requires_grad=True, device=rewrite_device)
     elif hasattr(model.config, 'hidden_size'):
-        delta = torch.zeros((model.config.hidden_size,), requires_grad=True, device=model.device)
+        delta = torch.zeros((model.config.hidden_size,), requires_grad=True, device=rewrite_device)
     else:
         raise NotImplementedError
     target_init, kl_distr_init = None, None
@@ -154,8 +157,8 @@ def compute_z(
         elif output.shape[1] != rewriting_targets.shape[1]:
             output = torch.transpose(output, 0, 1)
         full_repr = output[:len(rewriting_prompts)]
-        log_probs = torch.log_softmax(ln_f(full_repr) @ lm_w + lm_b, dim=2)
-
+        log_probs = torch.log_softmax(ln_f(full_repr) @ lm_w.to(full_repr.device) + lm_b.to(full_repr.device), dim=2)
+        rewriting_targets = rewriting_targets.to(log_probs.device)
         loss = torch.gather(
             log_probs,
             2,
@@ -173,7 +176,7 @@ def compute_z(
             torch.norm(delta) / torch.norm(target_init) ** 2
         )
         # weight_decay = hparams.v_weight_decay * torch.norm(delta) ** 2
-        loss = nll_loss + kl_loss + weight_decay #+ torch.abs(torch.norm(target_init + delta) - torch.norm(target_init))
+        loss = nll_loss + kl_loss.to(nll_loss.device) + weight_decay.to(nll_loss.device) #+ torch.abs(torch.norm(target_init + delta) - torch.norm(target_init))
 
         ##### CODE to cut off calculation as soon as the target reaches top prediction
         prompt_prob = log_probs[1:,:, :]    #get only probalities of prompts, removing KL divergence prompt

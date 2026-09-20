@@ -1,7 +1,7 @@
 {
     "alg_name": "ENCORE",
-    "model_name": "Qwen/Qwen2.5-7B-Instruct-2507",
     "stats_dir": "./data/stats",
+    "model_name": "Qwen/Qwen2.5-7B-Instruct",
     "layers": [
         4, 5, 6, 7, 8
     ],

@@ -55,11 +55,11 @@ def apply_encore_to_model(
 
     with torch.no_grad():
         for w_name, (key_mat, val_mat, preservation_distance, new_edit_distance, old_edit_distance, inside_norms) in deltas.items():
-
+            weight_device = nethook.get_parameter(model, w_name).device
             if hparams.use_gd:
-                upd_matrix = key_mat.to("cuda")
+                upd_matrix = key_mat.to(weight_device)
             else:
-                key_mat, val_mat = key_mat.to("cuda"), val_mat.to("cuda")
+                key_mat, val_mat = key_mat.to(weight_device), val_mat.to(weight_device)
                 upd_matrix = key_mat @ val_mat.T
 
             w = nethook.get_parameter(model, w_name)
@@ -208,6 +208,9 @@ def execute_encore(
         start_insertion_time = time.time()
         print(f"\n\nLAYER {layer}\n")
 
+        weight_name = f"{hparams.rewrite_module_tmp.format(layer)}.weight"
+        weight_device = weights[weight_name]
+
         # Get current model activations
         layer_ks = compute_ks(model, tok, requests, hparams, layer, context_templates).T
         print(f"Writing {layer_ks.size(1)} key/value pair(s) into layer {layer}")
@@ -242,6 +245,7 @@ def execute_encore(
             force_recompute=hparams.calculate_objective_value,
             hparams=hparams
         )
+        cov = cov.to(weight_device)
 
         # Compute update in double precision
         #if 'llama' not in model.config._name_or_path.lower():
@@ -281,11 +285,11 @@ def execute_encore(
         adj_k = torch.linalg.solve(
             cov + layer_ks @ layer_ks.T,
             layer_ks,
-        ).cuda()
+        )
 
         ###Layer distribution code
         resid = targets / (len(hparams.layers) - i)  # Distribute residual across layers
-        upd_matrix = resid @ adj_k.T
+        upd_matrix = resid.to(weight_device) @ adj_k.T.to(weight_device)
 
         editing_times.append(time.time() - start_insertion_time)
 
@@ -309,7 +313,6 @@ def execute_encore(
         }
 
         # Adjust update matrix shape
-        weight_name = f"{hparams.rewrite_module_tmp.format(layer)}.weight"
         upd_matrix = upd_matrix_match_shape(upd_matrix, weights[weight_name].shape)
 
         print("orig norm", torch.linalg.norm(weights[weight_name]))

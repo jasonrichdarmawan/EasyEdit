@@ -1,5 +1,6 @@
 {
     "alg_name": "ENCORE",
+    "stats_dir": "./data/stats",
     "model_name": "CohereLabs/aya-expanse-8b",
     "layers": [
         4, 5, 6, 7, 8
