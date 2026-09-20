@@ -232,6 +232,11 @@ def compute_z(
         f"Init norm {target_init.norm()} | Delta norm {delta.norm()} | Target norm {target.norm()}"
     )
 
+    response = {
+        "cur_z": target.detach(),
+        "target_init": target_init.detach(),
+    }
+
     if return_statistics:
         final_statistics = {
             "delta_vector_loss": float(loss.detach().cpu()),
@@ -243,6 +248,6 @@ def compute_z(
             "target_init_norm": float(target_init.norm().detach().cpu()),
             "target_norm": float(target.norm().detach().cpu()),
         }
-        return target, final_statistics
+        response["target_statistics"] = final_statistics
 
-    return target
+    return response

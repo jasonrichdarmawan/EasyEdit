@@ -178,10 +178,14 @@ def execute_Revised_AlphaEdit(
                 context_templates=context_templates,
                 return_statistics=return_statistics,
             )
+            cur_z = results["cur_z"]
+            target_init = results["target_init"]
             if return_statistics:
-                cur_z, target_statistics = z_result
-            else:
-                cur_z = z_result
+                target_statistics = results["target_statistics"]
+
+            if target_init.norm() > 1000:
+                print(f"Warning: target_init norm is {target_init.norm()}, which is unusually large. This may indicate an issue with the computation.")
+                break
             
             z_list.append(cur_z)
             zs = torch.stack(z_list, dim=1) # shape [d_model, num_requests]
