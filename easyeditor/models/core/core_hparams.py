@@ -37,6 +37,7 @@ class COREHyperParams(HyperParams):
     mom2_dataset: str
     mom2_n_samples: int
     mom2_dtype: str
+    mom2_batch_tokens: int
     alg_name: str
     device: int
     model_name: str

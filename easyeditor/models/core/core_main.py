@@ -199,6 +199,7 @@ def execute_core(
             if not force_recompute
             else hparams.mom2_n_samples // 10,
             hparams.mom2_dtype,
+            mom2_batch_tokens=hparams.mom2_batch_tokens,
             force_recompute=force_recompute,
             hparams=hparams
         )
@@ -256,6 +257,7 @@ def get_cov(
     mom2_dataset: str,
     mom2_n_samples: str,
     mom2_dtype: str,
+    mom2_batch_tokens: int,
     inv: bool = False,
     force_recompute: bool = False,
     hparams=None,
@@ -279,6 +281,7 @@ def get_cov(
             to_collect=["mom2"],
             sample_size=mom2_n_samples,
             precision=mom2_dtype,
+            batch_tokens=mom2_batch_tokens,
             hparams=hparams,
             force_recompute=force_recompute,
         )
