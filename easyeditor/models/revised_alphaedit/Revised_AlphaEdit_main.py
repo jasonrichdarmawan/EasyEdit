@@ -178,7 +178,9 @@ def execute_Revised_AlphaEdit(
 
             if target_init.norm() > 1000:
                 print(f"Warning: target_init norm is {target_init.norm()}, which is unusually large. This may indicate an issue with the computation.")
-                break
+                if hparams.skip_high_target_init_norm:
+                    print(f"Skipping this edit due to high norm.")
+                    break
             
             z_list.append(cur_z)
             zs = torch.stack(z_list, dim=1) # shape [d_model, num_requests]

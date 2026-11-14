@@ -47,6 +47,8 @@ class Revised_AlphaEditHyperParams(HyperParams):
     model_parallel: bool = False
     mom2_batch_tokens: int = None
 
+    skip_high_target_init_norm: bool = True
+
     @classmethod
     def from_hparams(cls, hparams_name_or_path: str):
 
