@@ -264,7 +264,13 @@ def compute_z(
     print(
         f"Init norm {target_init.norm()} | Delta norm {delta.norm()} | Target norm {target.norm()}"
     )
-    return target
+
+    response = {
+        "cur_z": target,
+        "target_init": target_init.detach(),
+    }
+
+    return response
 
 
 def get_context_templates(model, tok, request, context_type='all', n_gen=5, max_length=10, ctx_top_k: int = 5):

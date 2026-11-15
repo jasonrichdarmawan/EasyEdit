@@ -56,6 +56,8 @@ class COREHyperParams(HyperParams):
     reg_lambda:int = 0
     layer_range: int = 0 
 
+    skip_high_target_init_norm: bool = False
+
     lambda_ : float = 0
     @classmethod
     def from_hparams(cls, hparams_name_or_path: str):

@@ -1,5 +1,6 @@
 import os
 from copy import deepcopy
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -16,6 +17,8 @@ from ...util.globals import *
 from .compute_ks import compute_ks
 from .compute_z import compute_z, get_module_input_output_at_words, find_fact_lookup_idx
 from .core_hparams import COREHyperParams
+
+LOGGER = logging.getLogger(__name__)
 
 # Cache variable(s)
 CONTEXT_TEMPLATES_CACHE = None
@@ -113,6 +116,7 @@ def execute_core(
     z_module_name = hparams.layer_module_tmp.format(z_layer)
     z_device = get_module_device(nethook.get_module(model, z_module_name), device)
     z_list = []
+    valid_requests = []
 
     for request in requests:
         # Retrieve k/v pair if already stored in cache
@@ -132,14 +136,14 @@ def execute_core(
         ):
             try:
                 data = np.load(cache_fname)
-                z_list.append(torch.from_numpy(data["v_star"]).to(z_device))
+                cur_z = torch.from_numpy(data["v_star"]).to(z_device)
                 data_loaded = True
             except Exception as e:
                 print(f"Error reading cache file due to {e}. Recomputing...")
 
         # Compute k/v pair if not loaded from cache
         if not data_loaded:
-            cur_z = compute_z(
+            results = compute_z(
                 model,
                 tok,
                 request,
@@ -147,8 +151,14 @@ def execute_core(
                 z_layer,
                 context_templates,
             )
+            cur_z = results["cur_z"]
+            target_init = results["target_init"]
 
-            z_list.append(cur_z)
+            if target_init.norm() > 1000:
+                LOGGER.warning(f"Warning: target_init norm is {target_init.norm()}, which is unusually high. This may indicate an issue with the computation.")
+                if getattr(hparams, "skip_high_target_init_norm", False):
+                    LOGGER.warning("Skipping this request due to high target_init norm.")
+                    continue
 
             if cache_fname is not None:
                 cache_fname.parent.mkdir(exist_ok=True, parents=True)
@@ -159,6 +169,16 @@ def execute_core(
                     },
                 )
                 print(f"Cached k/v pair at {cache_fname}")
+
+        z_list.append(cur_z)
+        valid_requests.append(request)
+
+    requests = valid_requests
+
+    if len(requests) == 0:
+        LOGGER.warning("All requests in this batch were skipped due to high target_init norm.")
+        return {}
+
     zs = torch.stack(z_list, dim=1)
 
     # Insert
