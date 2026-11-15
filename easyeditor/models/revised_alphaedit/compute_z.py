@@ -210,8 +210,10 @@ def compute_z(
             f"avg prob of [{request['target_new']}] "
             f"{torch.exp(-nll_loss_each).mean().item()}"
         )
-        
-        if loss < 5e-2:
+
+        if hparams.z_break == "loss" and loss < 5e-2:
+            break
+        if hparams.z_break == "nll_loss" and nll_loss < 1e-1:
             break
 
         if it == hparams.v_num_grad_steps - 1:
