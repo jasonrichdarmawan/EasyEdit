@@ -57,6 +57,7 @@ class COREHyperParams(HyperParams):
     layer_range: int = 0 
 
     skip_high_target_init_norm: bool = False
+    recompute_target: bool = False
 
     lambda_ : float = 0
     @classmethod

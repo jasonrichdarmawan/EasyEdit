@@ -66,6 +66,89 @@ def apply_core_to_model(
     return model, weights_copy
 
 
+def get_target_zs(
+    model: AutoModelForCausalLM,
+    tok: AutoTokenizer,
+    requests: List[Dict],
+    hparams: COREHyperParams,
+    z_layer: int,
+    context_templates: List[Any],
+    z_device: torch.device,
+    cache_template: Optional[str] = None,
+    filter_invalid: bool = False,
+) -> Tuple[Optional[torch.Tensor], List[Dict]]:
+    """
+    Computes or retrieves target vectors (z*) at z_layer for the given requests.
+    When filter_invalid is True, requests with unusually high target_init norm can be skipped.
+    """
+    z_list = []
+    valid_requests = []
+
+    for request in requests:
+        # Retrieve k/v pair if already stored in cache
+        cache_fname = (
+            Path(
+                str(cache_template).format(
+                    z_layer, hparams.clamp_norm_factor, request["case_id"]
+                )
+            )
+            if cache_template is not None
+            else None
+        )
+        data_loaded = False
+        if (
+            cache_fname is not None  # Require cache template
+            and cache_fname.exists()  # Cache file must exist
+        ):
+            try:
+                data = np.load(cache_fname)
+                cur_z = torch.from_numpy(data["v_star"]).to(z_device)
+                data_loaded = True
+            except Exception as e:
+                print(f"Error reading cache file due to {e}. Recomputing...")
+
+        # Compute k/v pair if not loaded from cache
+        if not data_loaded:
+            results = compute_z(
+                model,
+                tok,
+                request,
+                hparams,
+                z_layer,
+                context_templates,
+            )
+            cur_z = results["cur_z"]
+            target_init = results["target_init"]
+
+            if target_init.norm() > 1000:
+                LOGGER.warning(
+                    f"Warning: target_init norm is {target_init.norm()}, which is unusually high. "
+                    f"This may indicate an issue with the computation."
+                )
+                if filter_invalid and getattr(hparams, "skip_high_target_init_norm", False):
+                    LOGGER.warning("Skipping this request due to high target_init norm.")
+                    continue
+
+            if cache_fname is not None:
+                cache_fname.parent.mkdir(exist_ok=True, parents=True)
+                np.savez(
+                    cache_fname,
+                    **{
+                        "v_star": cur_z.detach().cpu().numpy(),
+                    },
+                )
+                print(f"Cached k/v pair at {cache_fname}")
+
+        z_list.append(cur_z.to(z_device))
+        valid_requests.append(request)
+
+    if len(z_list) == 0:
+        return None, []
+
+    zs = torch.stack(z_list, dim=1)
+    return zs, valid_requests
+
+
 def execute_core(
     model: AutoModelForCausalLM,
     tok: AutoTokenizer,
@@ -111,79 +194,47 @@ def execute_core(
     weights_copy = {k: v.detach().clone() for k, v in weights.items()}
 
     # Compute z for final layer
-    context_templates = get_context_templates(model = model, tok = tok, length = hparams.ctx_len, ctx_top_k = hparams.ctx_top_k, ctx_num=hparams.ctx_num) 
+    context_templates = get_context_templates(model=model, tok=tok, length=hparams.ctx_len, ctx_top_k=hparams.ctx_top_k, ctx_num=hparams.ctx_num) 
     z_layer = hparams.layers[-1]
     z_module_name = hparams.layer_module_tmp.format(z_layer)
     z_device = get_module_device(nethook.get_module(model, z_module_name), device)
-    z_list = []
-    valid_requests = []
 
-    for request in requests:
-        # Retrieve k/v pair if already stored in cache
-        cache_fname = (
-            Path(
-                str(cache_template).format(
-                    z_layer, hparams.clamp_norm_factor, request["case_id"]
-                )
-            )
-            if cache_template is not None
-            else None
-        )
-        data_loaded = False
-        if (
-            cache_fname is not None  # Require cache template
-            and cache_fname.exists()  # Cache file must exist
-        ):
-            try:
-                data = np.load(cache_fname)
-                cur_z = torch.from_numpy(data["v_star"]).to(z_device)
-                data_loaded = True
-            except Exception as e:
-                print(f"Error reading cache file due to {e}. Recomputing...")
-
-        # Compute k/v pair if not loaded from cache
-        if not data_loaded:
-            results = compute_z(
-                model,
-                tok,
-                request,
-                hparams,
-                z_layer,
-                context_templates,
-            )
-            cur_z = results["cur_z"]
-            target_init = results["target_init"]
-
-            if target_init.norm() > 1000:
-                LOGGER.warning(f"Warning: target_init norm is {target_init.norm()}, which is unusually high. This may indicate an issue with the computation.")
-                if getattr(hparams, "skip_high_target_init_norm", False):
-                    LOGGER.warning("Skipping this request due to high target_init norm.")
-                    continue
-
-            if cache_fname is not None:
-                cache_fname.parent.mkdir(exist_ok=True, parents=True)
-                np.savez(
-                    cache_fname,
-                    **{
-                        "v_star": cur_z.detach().cpu().numpy(),
-                    },
-                )
-                print(f"Cached k/v pair at {cache_fname}")
-
-        z_list.append(cur_z)
-        valid_requests.append(request)
-
-    requests = valid_requests
+    zs, requests = get_target_zs(
+        model,
+        tok,
+        requests,
+        hparams,
+        z_layer,
+        context_templates,
+        z_device,
+        cache_template=cache_template,
+        filter_invalid=True,
+    )
 
     if len(requests) == 0:
         LOGGER.warning("All requests in this batch were skipped due to high target_init norm.")
         return {}
 
-    zs = torch.stack(z_list, dim=1)
-
     # Insert
     for i, layer in enumerate(hparams.layers):
         print(f"\n\nLAYER {layer}\n")
+
+        # If recompute_target is enabled, recompute target z after earlier layer updates
+        if i > 0 and getattr(hparams, "recompute_target", False):
+            print(f"Recomputing target z after editing layer {hparams.layers[i-1]}...")
+            del zs
+            torch.cuda.empty_cache()
+            zs, _ = get_target_zs(
+                model,
+                tok,
+                requests,
+                hparams,
+                z_layer,
+                context_templates,
+                z_device,
+                cache_template=None,
+                filter_invalid=False,
+            )
 
         # Get current model activations
         layer_ks = compute_ks(model, tok, requests, hparams, layer, context_templates).T
@@ -259,6 +310,11 @@ def execute_core(
             x.cpu()
             del x
         torch.cuda.empty_cache()
+
+    # Clear GPU memory for zs
+    if "zs" in locals():
+        del zs
+    torch.cuda.empty_cache()
 
     # Restore state of original model
     with torch.no_grad():
