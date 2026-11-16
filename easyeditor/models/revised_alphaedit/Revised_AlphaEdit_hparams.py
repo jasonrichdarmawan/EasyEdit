@@ -49,6 +49,8 @@ class Revised_AlphaEditHyperParams(HyperParams):
 
     skip_high_target_init_norm: bool = True
     z_break: Literal["loss", "nll_loss"] = "loss"
+    recompute_criteria: Literal["always", "loss"] = "always"
+    edit_mode: Literal["request", "batch"] = "request"
 
     @classmethod
     def from_hparams(cls, hparams_name_or_path: str):

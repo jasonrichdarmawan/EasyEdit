@@ -125,6 +125,9 @@ def execute_Revised_AlphaEdit(
 ) -> Dict[str, Tuple[torch.Tensor]] | Tuple[Dict[str, Tuple[torch.Tensor]], List[Dict[str, Any]]]:
     global edit_count
 
+    if hparams.edit_mode not in ("request", "batch"):
+        raise ValueError(f"Unsupported edit_mode: {hparams.edit_mode!r}")
+
     deltas = {}
     statistics = []
 
@@ -152,44 +155,80 @@ def execute_Revised_AlphaEdit(
     context_templates = get_context_templates(model=model, tokenizer=tok)
     print(f"Context templates used for computing z and k/v pairs: {context_templates}")
 
-    for request in requests:
-        print(
-            f"Executing AlphaEdit_Circuit algo\n"
-            f"Request: [{request['prompt']}] [{request['target_true']}] -> [{request['target_new']}]"
-        )
+    request_groups = (
+        [[request] for request in requests]
+        if hparams.edit_mode == "request"
+        else [requests]
+    )
+    for request_group in request_groups:
+        for request in request_group:
+            print(
+                f"Executing Revised_AlphaEdit algo\n"
+                f"Request: [{request['prompt']}] [{request['target_true']}] -> [{request['target_new']}]"
+            )
 
+        # Keep each request's target and recomputation decision independent, even in batch mode.
+        active_states = [
+            {"request": request, "target": None, "prev_loss": float("inf")}
+            for request in request_group
+        ]
         total_source_updates = len(hparams.layers)
         updates_done = 0
-        for layer in hparams.layers: # ablation
-            z_list = []
-            results = compute_z(
-                model=model,
-                tok=tok,
-                request=request,
-                hparams=hparams,
-                layer=hparams.layers[-1],
-                context_templates=context_templates,
-                return_statistics=return_statistics,
-            )
-            cur_z = results["cur_z"]
-            target_init = results["target_init"]
-            if return_statistics:
-                target_statistics = results["target_statistics"]
 
-            if target_init.norm() > 1000:
-                print(f"Warning: target_init norm is {target_init.norm()}, which is unusually large. This may indicate an issue with the computation.")
-                if hparams.skip_high_target_init_norm:
-                    print(f"Skipping this edit due to high norm.")
-                    break
-            
-            z_list.append(cur_z)
+        for layer in hparams.layers:
+            remaining_states = []
+            for state in active_states:
+                request = state["request"]
+                target = state["target"]
+                should_recompute = updates_done == 0
+                if hparams.recompute_criteria == None:
+                    pass
+                elif hparams.recompute_criteria == "always":
+                    should_recompute = True
+                elif hparams.recompute_criteria == "loss":
+                    should_recompute = state["prev_loss"] > 5e-2
+                else:
+                    raise ValueError(f"Unsupported recompute_criteria: {hparams.recompute_criteria!r}")
+ 
+                if should_recompute:
+                    if updates_done > 0:
+                        print(
+                            f"Recomputing target for request: "
+                            f"[{request['prompt']}] [{request['target_true']}] -> [{request['target_new']}] "
+                            f"at layer {layer} due to recompute_criteria: {hparams.recompute_criteria}"
+                        )
+                    target = compute_z(
+                        model=model,
+                        tok=tok,
+                        request=request,
+                        hparams=hparams,
+                        layer=hparams.layers[-1],
+                        context_templates=context_templates,
+                        return_statistics=return_statistics,
+                    )
+                    state["target"] = target
+                    state["prev_loss"] = target["nll_loss"]
+                state["target_recomputed"] = should_recompute
+
+                if target["target_init"].norm() > 1000:
+                    print(f"Warning: target_init norm is {target['target_init'].norm()}, which is unusually large. This may indicate an issue with the computation.")
+                    if hparams.skip_high_target_init_norm:
+                        print(f"Skipping this edit due to high norm.")
+                        continue
+                remaining_states.append(state)
+
+            active_states = remaining_states
+            if not active_states:
+                break
+            layer_requests = [state["request"] for state in active_states]
+            z_list = [state["target"]["cur_z"] for state in active_states]
             zs = torch.stack(z_list, dim=1) # shape [d_model, num_requests]
             
             # Get current model activations
             layer_ks = compute_ks(
                 model=model,
                 tok=tok,
-                requests=[request],
+                requests=layer_requests,
                 hparams=hparams,
                 layer=layer,
                 context_templates=context_templates,
@@ -197,8 +236,7 @@ def execute_Revised_AlphaEdit(
             print(f"Writing {layer_ks.size(1)} key/value pair(s) into layer {layer}")
 
             # Compute residual error
-            all_prompts = []
-            all_prompts.append(request["prompt"])
+            all_prompts = [request["prompt"] for request in layer_requests]
             
             tok.padding_side = "right"
             cur_zs_tok = tok(
@@ -209,16 +247,16 @@ def execute_Revised_AlphaEdit(
             ).to(model.get_input_embeddings().weight.device)
             
             idxs = []
-            if hparams.fact_token == "subject_first":
-                start_char = all_prompts[0].find(request["subject"])
-                start_tok = cur_zs_tok.char_to_token(0, start_char)
-                idxs.append(start_tok)
-            elif hparams.fact_token == "subject_last":
-                start_char = all_prompts[0].find(request["subject"])
-                start_tok = cur_zs_tok.char_to_token(0, start_char)
-                end_char = start_char + len(request["subject"]) - 1
-                end_tok = cur_zs_tok.char_to_token(0, end_char)
-                idxs.append(end_tok)
+            for i, request in enumerate(layer_requests):
+                if hparams.fact_token == "subject_first":
+                    start_char = all_prompts[i].find(request["subject"])
+                    start_tok = cur_zs_tok.char_to_token(i, start_char)
+                    idxs.append(start_tok)
+                elif hparams.fact_token == "subject_last":
+                    start_char = all_prompts[i].find(request["subject"])
+                    end_char = start_char + len(request["subject"]) - 1
+                    end_tok = cur_zs_tok.char_to_token(i, end_char)
+                    idxs.append(end_tok)
             print(f"cur_zs_idxs: {idxs}")
             for i, idx in enumerate(idxs):
                 print(f"Prompt {i}: {tok.decode(cur_zs_tok['input_ids'][i][:idx + 1])}")
@@ -234,10 +272,10 @@ def execute_Revised_AlphaEdit(
                     del cur_zs_tok
             
             cur_zs = tr.output[list(range(tr.output.shape[0])), idxs].T # shape [d_model, num_requests]
-            targets = zs - cur_zs
+            targets = zs - cur_zs.to(device=zs.device, dtype=zs.dtype)
             del zs, cur_zs
-            z_error = torch.linalg.norm(targets, dim=0).mean()
-            print("z error", z_error)
+            z_errors = torch.linalg.norm(targets, dim=0)
+            print("z error", z_errors.mean())
 
             repeat_factor = layer_ks.size(1) // targets.size(1)
             targets = targets.repeat_interleave(repeat_factor, dim=1)
@@ -277,18 +315,21 @@ def execute_Revised_AlphaEdit(
             print("upd norm", update_norm)
 
             if return_statistics:
-                target_statistics.update(
-                    {
-                        "case_id": request.get("case_id"),
-                        "edit_id": edit_count,
-                        "edited_layer": layer,
-                        "target_layer": hparams.layers[-1],
-                        "z_error": float(z_error.detach().cpu()),
-                        "weight_norm_before_update": float(original_weight_norm.detach().cpu()),
-                        "weight_update_norm": float(update_norm.detach().cpu()),
-                    }
-                )
-                statistics.append(target_statistics)
+                for state, z_error in zip(active_states, z_errors):
+                    stat = deepcopy(state["target"]["target_statistics"])
+                    stat.update(
+                        {
+                            "case_id": state["request"].get("case_id"),
+                            "edit_id": edit_count,
+                            "edited_layer": layer,
+                            "target_layer": hparams.layers[-1],
+                            "z_error": float(z_error.detach().cpu()),
+                            "weight_norm_before_update": float(original_weight_norm.detach().cpu()),
+                            "weight_update_norm": float(update_norm.detach().cpu()),
+                            "target_recomputed": state["target_recomputed"],
+                        }
+                    )
+                    statistics.append(stat)
 
             # Update model weights and record desired changes in `delta` variable
             with torch.no_grad():

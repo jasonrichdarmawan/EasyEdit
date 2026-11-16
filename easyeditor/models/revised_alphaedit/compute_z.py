@@ -7,6 +7,40 @@ from ...util import nethook
 from .Revised_AlphaEdit_hparams import Revised_AlphaEditHyperParams
 
 
+def get_rewriting_prompts(request: dict, context_templates: list) -> list[str]:
+    rewriting_prompts = []
+    for context_types in context_templates:
+        for context in context_types:
+            prompt = context.replace("{prompt}", request["prompt"])
+            rewriting_prompts.append(prompt)
+    return rewriting_prompts
+
+
+def compute_nll_loss_from_output(
+    output: torch.Tensor,
+    rewriting_targets: torch.Tensor,
+    num_rewriting_prompts: int,
+    ln_f: torch.nn.Module,
+    lm_w: torch.Tensor,
+    lm_b: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    full_repr = output[:num_rewriting_prompts]
+    log_probs = torch.log_softmax(
+        ln_f(full_repr) @ lm_w.to(full_repr.device) + lm_b.to(full_repr.device), dim=2
+    ) # shape [batch, seq_len, vocab_size]
+    target_ids = rewriting_targets.to(log_probs.device)
+    mask = (target_ids != -100).float()
+    loss = torch.gather(
+        log_probs,
+        2,
+        torch.where(target_ids != -100, target_ids, 0).unsqueeze(2),
+    ).squeeze(2) # shape [batch, seq_len]
+    # Aggregate total losses
+    nll_loss_each = -(loss * mask).sum(1) / mask.sum(1)
+    nll_loss = nll_loss_each.mean()
+    return nll_loss, nll_loss_each
+
+
 def compute_z(
     model: AutoModelForCausalLM,
     tok: AutoTokenizer,
@@ -38,11 +72,7 @@ def compute_z(
     print("Computing right vector (v)")
     
     # Compile list of rewriting and KL x/y pairs
-    rewriting_prompts = []
-    for context_types in context_templates:
-        for context in context_types:
-            prompt = context.replace("{prompt}", request["prompt"])
-            rewriting_prompts.append(prompt)
+    rewriting_prompts = get_rewriting_prompts(request, context_templates)
     kl_prompts = [f"{request['subject']} is a"]
     
     all_prompts = []
@@ -179,20 +209,14 @@ def compute_z(
                 f"output shape={tuple(output.shape)}, expected batch={expected_batch_size}, "
                 f"expected sequence={expected_sequence_length}."
             )
-        full_repr = output[:len(rewriting_prompts)]
-
-        log_probs = torch.log_softmax(ln_f(full_repr) @ lm_w.to(full_repr.device) + lm_b.to(full_repr.device), dim=2) # shape [batch, seq_len, vocab_size]
-        target_ids = rewriting_targets.to(log_probs.device)
-        mask = (target_ids != -100).float()
-        loss = torch.gather(
-            log_probs,
-            2,
-            torch.where(target_ids != -100, target_ids, 0).unsqueeze(2),
-        ).squeeze(2) # shape [batch, seq_len]
-
-        # Aggregate total losses
-        nll_loss_each = -(loss * mask).sum(1) / mask.sum(1)
-        nll_loss = nll_loss_each.mean()
+        nll_loss, nll_loss_each = compute_nll_loss_from_output(
+            output=output,
+            rewriting_targets=rewriting_targets,
+            num_rewriting_prompts=len(rewriting_prompts),
+            ln_f=ln_f,
+            lm_w=lm_w,
+            lm_b=lm_b,
+        )
         
         kl_loss = hparams.kl_factor * torch.nn.functional.kl_div(
             kl_distr_init, kl_log_probs, log_target=True, reduction="batchmean"
@@ -237,6 +261,7 @@ def compute_z(
     response = {
         "cur_z": target.detach(),
         "target_init": target_init.detach(),
+        "nll_loss": float(nll_loss.detach().cpu()),
     }
 
     if return_statistics:
